@@ -2,12 +2,15 @@ import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'crypto';
 import { createClient } from '@supabase/supabase-js';
 
+export const dynamic = 'force-dynamic';
+
 const GRAPH_API_VERSION = 'v20.0';
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://placeholder.supabase.co',
-  process.env.SUPABASE_SERVICE_ROLE_KEY || 'placeholder'
-);
+function getSupabaseClient() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://placeholder.supabase.co';
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || 'placeholder_key';
+  return createClient(url, key);
+}
 
 interface GeminiAnalysisResult {
   isRoadHazard: boolean;
@@ -33,6 +36,7 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
+  const supabase = getSupabaseClient();
   try {
     const rawBody = await req.text();
 
@@ -210,6 +214,7 @@ async function completeHazardSubmission(params: {
   arabicLabel: string;
   aiScore: number;
 }) {
+  const supabase = getSupabaseClient();
   const formattedPhone = `+${params.phone.replace(/^\+/, '')}`;
 
   let { data: profile } = await supabase
@@ -326,6 +331,7 @@ async function downloadMediaFromMeta(mediaId: string): Promise<{ fileBuffer: Buf
 }
 
 async function uploadToStorage(buffer: Buffer, mimeType: string, phone: string): Promise<string> {
+  const supabase = getSupabaseClient();
   const extension = mimeType.includes('png') ? 'png' : 'jpg';
   const fileName = `whatsapp/${phone}/${Date.now()}.${extension}`;
 
@@ -367,4 +373,4 @@ function verifyMetaHmacSignature(rawBody: string, signatureHeader: string, appSe
   const receivedBuffer = Buffer.from(receivedHash, 'utf8');
   return expectedBuffer.length === receivedBuffer.length && crypto.timingSafeEqual(expectedBuffer, receivedBuffer);
 }
-
+  
