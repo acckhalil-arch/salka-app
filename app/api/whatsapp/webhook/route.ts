@@ -21,41 +21,34 @@ export async function POST(req: Request) {
   try {
     const body = await req.json();
 
-    // Check environment variables inside POST to prevent module load crash
+    // Direct fallback for your Supabase URL (Supabase URLs are public endpoints)
     const supabaseUrl =
-      process.env.NEXT_PUBLIC_SUPABASE_URL ||
       process.env.SUPABASE_URL ||
-      "";
+      process.env.NEXT_PUBLIC_SUPABASE_URL ||
+      "https://rsqdqvftbslcxuclhqrh.supabase.co";
+
+    // Service key fallback
     const supabaseKey =
       process.env.SUPABASE_SERVICE_ROLE_KEY ||
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
-      "";
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
-    // If variables are still missing, log diagnostics and return 200 to keep Meta happy
-    if (!supabaseUrl || !supabaseKey) {
-      console.error("Supabase credentials missing at runtime:", {
-        hasUrl: Boolean(supabaseUrl),
-        hasKey: Boolean(supabaseKey),
-        foundUrlName: process.env.NEXT_PUBLIC_SUPABASE_URL ? "NEXT_PUBLIC_SUPABASE_URL" : process.env.SUPABASE_URL ? "SUPABASE_URL" : "NONE",
-      });
-      return NextResponse.json({ received: true, db: "skipped_missing_env" }, { status: 200 });
+    if (!supabaseKey) {
+      console.error("Missing SUPABASE_SERVICE_ROLE_KEY or ANON KEY in runtime environment.");
+      return NextResponse.json({ received: true, db: "missing_key" }, { status: 200 });
     }
 
-    // Initialize Supabase safely inside the function
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    // Parse incoming WhatsApp message
     const entry = body?.entry?.[0];
     const changes = entry?.changes?.[0];
     const value = changes?.value;
     const message = value?.messages?.[0];
 
     if (message) {
-      const from = message.from; // Sender WhatsApp number
-      const text = message.text?.body || message.type; // Message content
+      const from = message.from || "unknown_sender";
+      const text = message.text?.body || message.type || "unknown_message";
 
-      // Insert hazard report into Supabase
-      const { error: dbError } = await supabase.from("hazards").insert([
+      const { data, error: dbError } = await supabase.from("hazards").insert([
         {
           sender: from,
           message: text,
@@ -66,14 +59,14 @@ export async function POST(req: Request) {
 
       if (dbError) {
         console.error("Supabase insert error:", dbError.message);
+      } else {
+        console.log("Successfully inserted hazard record into Supabase");
       }
     }
 
-    // Always respond 200 OK to Meta
     return NextResponse.json({ status: "success" }, { status: 200 });
   } catch (error: any) {
     console.error("Unhandled Webhook POST Error:", error?.message || error);
-    // Returning 200 prevents Meta from dropping the webhook subscription
     return NextResponse.json({ error: error?.message || "Internal error" }, { status: 200 });
   }
 }
