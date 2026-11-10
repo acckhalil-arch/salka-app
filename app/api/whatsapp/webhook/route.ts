@@ -21,7 +21,7 @@ export async function POST(req: Request) {
   try {
     const body = await req.json();
 
-    // Direct fallback for your Supabase URL (Supabase URLs are public endpoints)
+    // Direct fallback for your Supabase URL
     const supabaseUrl =
       process.env.SUPABASE_URL ||
       process.env.NEXT_PUBLIC_SUPABASE_URL ||
