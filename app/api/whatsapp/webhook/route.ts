@@ -25,8 +25,8 @@ export async function POST(req: Request) {
     const supabaseUrl =
       process.env.SUPABASE_URL ||
       process.env.NEXT_PUBLIC_SUPABASE_URL ||
-      "https://rsqdqvftbslcxuclhqrh.supabase.co";
-
+      "https://rsqdqvftbslcxuclciqh.supabase.co";
+  
     // Service key fallback
     const supabaseKey =
       process.env.SUPABASE_SERVICE_ROLE_KEY ||
