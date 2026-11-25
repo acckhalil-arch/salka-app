@@ -8,7 +8,7 @@ export async function GET(req: Request) {
   const token = searchParams.get("hub.verify_token");
   const challenge = searchParams.get("hub.challenge");
 
-  const verifyToken = process.env.WHATSAPP_VERIFY_TOKEN;
+  const verifyToken = process.env.WHATSAPP_VERIFY_TOKEN || "Salka_verify_2026";
 
   if (mode === "subscribe" && token === verifyToken) {
     return new Response(challenge, { status: 200 });
@@ -48,7 +48,7 @@ export async function POST(req: Request) {
       const from = message.from || "unknown_sender";
       const text = message.text?.body || message.type || "unknown_message";
 
-      const { data, error: dbError } = await supabase.from("hazards").insert([
+      const { error: dbError } = await supabase.from("hazards").insert([
         {
           sender: from,
           message: text,
