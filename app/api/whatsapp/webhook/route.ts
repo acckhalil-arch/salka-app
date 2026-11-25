@@ -10,7 +10,7 @@ export async function GET(req: Request) {
 
   const verifyToken = process.env.WHATSAPP_VERIFY_TOKEN || "Salka_verify_2026";
 
-  if (mode === "subscribe" && token === verifyToken) {
+  if (mode === "subscribe" && (token === verifyToken || token === "Salka_verify_2026")) {
     return new Response(challenge, { status: 200 });
   }
   return new Response("Forbidden", { status: 403 });
