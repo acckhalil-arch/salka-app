@@ -37,4 +37,116 @@ export async function POST(req: NextRequest) {
     const entry = body?.entry?.[0];
     const changes = entry?.changes?.[0];
     const value = changes?.value;
-    
+        const messages = value?.messages;
+
+    if (!messages || messages.length === 0) {
+      return NextResponse.json({ status: 'no_messages' }, { status: 200 });
+    }
+
+    for (const msg of messages) {
+      const whatsappMessageId = msg.id;
+      const senderPhone = msg.from;
+      const type = msg.type;
+
+      let messageText = '';
+      let latitude: number | null = null;
+      let longitude: number | null = null;
+      let locationName: string | null = null;
+      let mediaStatus = 'none';
+      let imageUrl: string | null = null;
+      let processingError: string | null = null;
+
+      if (type === 'text') {
+        messageText = msg.text?.body || '';
+      } else if (type === 'location') {
+        latitude = msg.location?.latitude ?? null;
+        longitude = msg.location?.longitude ?? null;
+        locationName = msg.location?.name || msg.location?.address || null;
+        messageText = locationName
+          ? `Location: ${locationName} (${latitude}, ${longitude})`
+          : `Location shared (${latitude}, ${longitude})`;
+      } else if (type === 'image') {
+        const mediaId = msg.image?.id;
+        messageText = msg.image?.caption || 'Image hazard report';
+
+        if (!ACCESS_TOKEN) {
+          mediaStatus = 'failed';
+          processingError = 'Missing WHATSAPP_ACCESS_TOKEN environment variable';
+        } else if (mediaId) {
+          try {
+            const metaRes = await fetch(`https://graph.facebook.com/v21.0/${mediaId}`, {
+              headers: {
+                Authorization: `Bearer ${ACCESS_TOKEN}`,
+              },
+            });
+
+            if (!metaRes.ok) {
+              const errText = await metaRes.text();
+              throw new Error(`Meta API ${metaRes.status}: ${errText}`);
+            }
+
+            const metaData = await metaRes.json();
+            const downloadUrl = metaData.url;
+            const mimeType = metaData.mime_type || 'image/jpeg';
+            const ext = mimeType.split('/')[1]?.split(';')[0] || 'jpg';
+
+            const fileRes = await fetch(downloadUrl, {
+              headers: {
+                Authorization: `Bearer ${ACCESS_TOKEN}`,
+              },
+            });
+
+            if (!fileRes.ok) {
+              throw new Error(`Media download failed: ${fileRes.status}`);
+            }
+
+            const arrayBuffer = await fileRes.arrayBuffer();
+            const buffer = Buffer.from(arrayBuffer);
+            const filePath = `${whatsappMessageId}.${ext}`;
+
+            const { error: uploadError } = await supabase.storage
+              .from(BUCKET_NAME)
+              .upload(filePath, buffer, {
+                contentType: mimeType,
+                upsert: true,
+              });
+
+            if (uploadError) {
+              throw new Error(`Supabase Storage error: ${uploadError.message}`);
+            }
+
+            const { data: publicUrlData } = supabase.storage
+              .from(BUCKET_NAME)
+              .getPublicUrl(filePath);
+
+            imageUrl = publicUrlData.publicUrl;
+            mediaStatus = 'uploaded';
+          } catch (err: any) {
+            mediaStatus = 'failed';
+            processingError = err?.message || 'Unknown media processing error';
+          }
+        }
+      } else {
+        messageText = `Unsupported message type: ${type}`;
+      }
+
+      await supabase.from('hazards').insert({
+        whatsapp_message_id: whatsappMessageId,
+        sender_phone: senderPhone,
+        message: messageText,
+        latitude,
+        longitude,
+        location_name: locationName,
+        media_status: mediaStatus,
+        image_url: imageUrl,
+        processing_error: processingError,
+      });
+    }
+
+    return NextResponse.json({ status: 'ok' }, { status: 200 });
+  } catch (error: any) {
+    console.error('Webhook POST error:', error);
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+}
+
