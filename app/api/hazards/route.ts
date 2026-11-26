@@ -40,6 +40,20 @@ async function notifyCitizenOnWhatsApp(
   }
 
   try {
+    const isBsuid = !/^\d+$/.test(to);
+    const payload: Record<string, any> = {
+      messaging_product: 'whatsapp',
+      type: 'text',
+      text: { body: statusMessage },
+    };
+
+    if (isBsuid) {
+      payload.recipient_type = 'individual';
+      payload.to = to;
+    } else {
+      payload.to = to;
+    }
+
     await fetch(
       `https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/messages`,
       {
@@ -48,12 +62,7 @@ async function notifyCitizenOnWhatsApp(
           Authorization: `Bearer ${ACCESS_TOKEN}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          messaging_product: 'whatsapp',
-          to,
-          type: 'text',
-          text: { body: statusMessage },
-        }),
+        body: JSON.stringify(payload),
       }
     );
   } catch (err) {
@@ -107,6 +116,45 @@ export async function PATCH(req: NextRequest) {
         updatedHazard.hazard_category,
         status
       );
+    }
+
+    return NextResponse.json({ success: true }, { status: 200 });
+  } catch (err: any) {
+    return NextResponse.json({ error: err.message }, { status: 500 });
+  }
+}
+
+export async function DELETE(req: NextRequest) {
+  try {
+    const { searchParams } = new URL(req.url);
+    const idParam = searchParams.get('id');
+    const id = idParam ? Number(idParam) : null;
+
+    if (!id || Number.isNaN(id)) {
+      return NextResponse.json({ error: 'Invalid or missing hazard id' }, { status: 400 });
+    }
+
+    // جلب مسار الصورة لحذفها من Storage أيضًا إن أمكن
+    const { data: hazard } = await supabase
+      .from('hazards')
+      .select('image_url')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (hazard?.image_url) {
+      const parts = hazard.image_url.split('/hazard-images/');
+      if (parts[1]) {
+        await supabase.storage.from('hazard-images').remove([parts[1]]);
+      }
+    }
+
+    const { error } = await supabase
+      .from('hazards')
+      .delete()
+      .eq('id', id);
+
+    if (error) {
+      return NextResponse.json({ error: error.message }, { status: 500 });
     }
 
     return NextResponse.json({ success: true }, { status: 200 });
