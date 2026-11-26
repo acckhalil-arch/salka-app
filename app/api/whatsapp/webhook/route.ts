@@ -37,7 +37,7 @@ export async function POST(req: NextRequest) {
     const entry = body?.entry?.[0];
     const changes = entry?.changes?.[0];
     const value = changes?.value;
-        const messages = value?.messages;
+    const messages = value?.messages;
 
     if (!messages || messages.length === 0) {
       return NextResponse.json({ status: 'no_messages' }, { status: 200 });
@@ -74,6 +74,7 @@ export async function POST(req: NextRequest) {
           processingError = 'Missing WHATSAPP_ACCESS_TOKEN environment variable';
         } else if (mediaId) {
           try {
+            // Step 1: Retrieve temporary media download URL from Meta Graph API
             const metaRes = await fetch(`https://graph.facebook.com/v21.0/${mediaId}`, {
               headers: {
                 Authorization: `Bearer ${ACCESS_TOKEN}`,
@@ -90,6 +91,7 @@ export async function POST(req: NextRequest) {
             const mimeType = metaData.mime_type || 'image/jpeg';
             const ext = mimeType.split('/')[1]?.split(';')[0] || 'jpg';
 
+            // Step 2: Download binary image file from Meta
             const fileRes = await fetch(downloadUrl, {
               headers: {
                 Authorization: `Bearer ${ACCESS_TOKEN}`,
@@ -104,6 +106,7 @@ export async function POST(req: NextRequest) {
             const buffer = Buffer.from(arrayBuffer);
             const filePath = `${whatsappMessageId}.${ext}`;
 
+            // Step 3: Upload binary image to Supabase Storage
             const { error: uploadError } = await supabase.storage
               .from(BUCKET_NAME)
               .upload(filePath, buffer, {
@@ -115,6 +118,7 @@ export async function POST(req: NextRequest) {
               throw new Error(`Supabase Storage error: ${uploadError.message}`);
             }
 
+            // Step 4: Get public URL
             const { data: publicUrlData } = supabase.storage
               .from(BUCKET_NAME)
               .getPublicUrl(filePath);
@@ -130,7 +134,7 @@ export async function POST(req: NextRequest) {
         messageText = `Unsupported message type: ${type}`;
       }
 
-      await supabase.from('hazards').insert({
+      const { error: insertError } = await supabase.from('hazards').insert({
         whatsapp_message_id: whatsappMessageId,
         sender_phone: senderPhone,
         message: messageText,
@@ -141,6 +145,10 @@ export async function POST(req: NextRequest) {
         image_url: imageUrl,
         processing_error: processingError,
       });
+
+      if (insertError) {
+        console.error('Supabase insert failed:', JSON.stringify(insertError));
+      }
     }
 
     return NextResponse.json({ status: 'ok' }, { status: 200 });
@@ -149,4 +157,3 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
-
