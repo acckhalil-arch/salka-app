@@ -176,16 +176,72 @@ export async function POST(req: NextRequest) {
       const type = msg.type;
       const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
 
+      // 1. منع معالجة نفس الرسالة مرتين إذا أعاد سيرفر Meta إرسالها
+      const { data: existingMsg } = await supabase
+        .from('hazards')
+        .select('id')
+        .eq('whatsapp_message_id', whatsappMessageId)
+        .maybeSingle();
+
+      if (existingMsg) {
+        continue;
+      }
+
       if (type === 'image') {
         const whatsappMediaId = msg.image?.id || null;
         const captionText = msg.image?.caption || 'Image hazard report';
-        let mediaStatus = 'none';
+
+        // البحث أولًا عن بلاغ موقع ينتظر صورة لنفس المرسل
+        const { data: pendingLocationReport } = await supabase
+          .from('hazards')
+          .select('id, message')
+          .eq('sender', sender)
+          .eq('media_status', 'none')
+          .not('latitude', 'is', null)
+          .gte('created_at', fiveMinutesAgo)
+          .order('id', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        let targetReportId: number | null = pendingLocationReport?.id || null;
+        const isMergingWithLocation = Boolean(pendingLocationReport);
+
+        // 2. حجز السجل فورًا قبل التحميل والتحليل لمنع تضارب التوقيت مع رسالة الموقع
+        if (isMergingWithLocation && targetReportId) {
+          await supabase
+            .from('hazards')
+            .update({
+              whatsapp_message_id: whatsappMessageId,
+              whatsapp_media_id: whatsappMediaId,
+              media_status: 'processing',
+            })
+            .eq('id', targetReportId);
+        } else {
+          const { data: createdRow, error: insertErr } = await supabase
+            .from('hazards')
+            .insert({
+              whatsapp_message_id: whatsappMessageId,
+              sender,
+              message: captionText,
+              raw_payload: msg,
+              whatsapp_media_id: whatsappMediaId,
+              media_status: 'processing',
+            })
+            .select('id')
+            .single();
+
+          if (insertErr || !createdRow) {
+            continue;
+          }
+          targetReportId = createdRow.id;
+        }
+
+        let mediaStatus = 'failed';
         let imageUrl: string | null = null;
         let processingError: string | null = null;
         let aiResult: HazardAnalysis | null = null;
 
         if (!ACCESS_TOKEN) {
-          mediaStatus = 'failed';
           processingError = 'Missing WHATSAPP_ACCESS_TOKEN';
         } else if (whatsappMediaId) {
           try {
@@ -237,70 +293,50 @@ export async function POST(req: NextRequest) {
           }
         }
 
+        // 3. تحديث السجل المحجوز بنتائج الصورة والذكاء الاصطناعي وقراءة أحدث حالة للموقع
+        const { data: currentRow } = await supabase
+          .from('hazards')
+          .select('id, message, latitude')
+          .eq('id', targetReportId)
+          .single();
+
+        const updatedMsg =
+          isMergingWithLocation &&
+          captionText !== 'Image hazard report' &&
+          pendingLocationReport
+            ? `${captionText} | ${pendingLocationReport.message}`
+            : currentRow?.message || captionText;
+
+        await supabase
+          .from('hazards')
+          .update({
+            message: updatedMsg,
+            media_status: mediaStatus,
+            image_url: imageUrl,
+            processing_error: processingError,
+            hazard_category: aiResult?.category || null,
+            severity: aiResult?.severity || null,
+            ai_description: aiResult?.description || null,
+          })
+          .eq('id', targetReportId);
+
         const aiSummaryText = aiResult
           ? `\n🔍 التصنيف: ${aiResult.category}\n⚠️ درجة الخطورة: ${aiResult.severity}\n📝 الوصف: ${aiResult.description}`
           : '';
 
-        const { data: pendingLocationReport } = await supabase
-          .from('hazards')
-          .select('id, message')
-          .eq('sender', sender)
-          .is('image_url', null)
-          .not('latitude', 'is', null)
-          .gte('created_at', fiveMinutesAgo)
-          .order('id', { ascending: false })
-          .limit(1)
-          .maybeSingle();
+        const hasLocationNow = Boolean(currentRow?.latitude);
 
-        if (pendingLocationReport) {
-          const updatedMsg =
-            captionText !== 'Image hazard report'
-              ? `${captionText} | ${pendingLocationReport.message}`
-              : pendingLocationReport.message;
-
-          await supabase
-            .from('hazards')
-            .update({
-              message: updatedMsg,
-              whatsapp_media_id: whatsappMediaId,
-              media_status: mediaStatus,
-              image_url: imageUrl,
-              processing_error: processingError,
-              hazard_category: aiResult?.category || null,
-              severity: aiResult?.severity || null,
-              ai_description: aiResult?.description || null,
-            })
-            .eq('id', pendingLocationReport.id);
-
+        if (hasLocationNow) {
           await sendWhatsAppReply(
             incomingPhoneNumberId,
             sender,
-            `✅ شكرًا لك! تم دمج الصورة مع الموقع واكتمال بلاغك (رقم #${pendingLocationReport.id}).${aiSummaryText}`
+            `✅ شكرًا لك! تم دمج الصورة مع الموقع واكتمال بلاغك (رقم #${targetReportId}).${aiSummaryText}`
           );
         } else {
-          const { data: insertedRow } = await supabase
-            .from('hazards')
-            .insert({
-              whatsapp_message_id: whatsappMessageId,
-              sender,
-              message: captionText,
-              raw_payload: msg,
-              whatsapp_media_id: whatsappMediaId,
-              media_status: mediaStatus,
-              image_url: imageUrl,
-              processing_error: processingError,
-              hazard_category: aiResult?.category || null,
-              severity: aiResult?.severity || null,
-              ai_description: aiResult?.description || null,
-            })
-            .select('id')
-            .single();
-
-          const reportId = insertedRow?.id || '';
           await sendWhatsAppReply(
             incomingPhoneNumberId,
             sender,
-            `📸 تم استلام وتحليل صورة البلاغ (رقم #${reportId}).${aiSummaryText}\n\n📍 من فضلك أرسل الموقع الجغرافي (Location) الآن لإتمام البلاغ.`
+            `📸 تم استلام وتحليل صورة البلاغ (رقم #${targetReportId}).${aiSummaryText}\n\n📍 من فضلك أرسل الموقع الجغرافي (Location) الآن لإتمام البلاغ.`
           );
         }
       } else if (type === 'location') {
@@ -311,12 +347,13 @@ export async function POST(req: NextRequest) {
           ? `Location: ${locationName} (${latitude}, ${longitude})`
           : `Location shared (${latitude}, ${longitude})`;
 
+        // البحث عن أي بلاغ صورة ينتظر موقعًا (سواء اكتمل رفعه أو ما زال قيد المعالجة)
         const { data: pendingImageReport } = await supabase
           .from('hazards')
-          .select('id, message')
+          .select('id, message, media_status')
           .eq('sender', sender)
           .is('latitude', null)
-          .not('image_url', 'is', null)
+          .in('media_status', ['uploaded', 'processing'])
           .gte('created_at', fiveMinutesAgo)
           .order('id', { ascending: false })
           .limit(1)
@@ -339,13 +376,16 @@ export async function POST(req: NextRequest) {
             })
             .eq('id', pendingImageReport.id);
 
-          await sendWhatsAppReply(
-            incomingPhoneNumberId,
-            sender,
-            `✅ شكرًا لك! تم تسجيل بلاغك بالكامل (رقم البلاغ #${pendingImageReport.id}) مرفقًا بالصورة وتحليل الذكاء الاصطناعي والموقع الجغرافي.`
-          );
+          // إذا كانت الصورة ما زالت قيد التحليل، سيتولى فرع الصورة إرسال رسالة الاكتمال النهائية
+          if (pendingImageReport.media_status === 'uploaded') {
+            await sendWhatsAppReply(
+              incomingPhoneNumberId,
+              sender,
+              `✅ شكرًا لك! تم تسجيل بلاغك بالكامل (رقم البلاغ #${pendingImageReport.id}) مرفقًا بالصورة وتحليل الذكاء الاصطناعي والموقع الجغرافي.`
+            );
+          }
         } else {
-          const { data: insertedRow } = await supabase
+          const { data: insertedRow, error: insertErr } = await supabase
             .from('hazards')
             .insert({
               whatsapp_message_id: whatsappMessageId,
@@ -360,16 +400,17 @@ export async function POST(req: NextRequest) {
             .select('id')
             .single();
 
-          const reportId = insertedRow?.id || '';
-          await sendWhatsAppReply(
-            incomingPhoneNumberId,
-            sender,
-            `📍 تم استلام الموقع الجغرافي بنجاح (رقم #${reportId}).\n📸 من فضلك أرسل صورة للمشكلة الآن لإتمام البلاغ.`
-          );
+          if (!insertErr && insertedRow) {
+            await sendWhatsAppReply(
+              incomingPhoneNumberId,
+              sender,
+              `📍 تم استلام الموقع الجغرافي بنجاح (رقم #${insertedRow.id}).\n📸 من فضلك أرسل صورة للمشكلة الآن لإتمام البلاغ.`
+            );
+          }
         }
       } else if (type === 'text') {
         const messageText = msg.text?.body || '';
-        await supabase.from('hazards').insert({
+        const { error: insertErr } = await supabase.from('hazards').insert({
           whatsapp_message_id: whatsappMessageId,
           sender,
           message: messageText,
@@ -377,11 +418,13 @@ export async function POST(req: NextRequest) {
           media_status: 'none',
         });
 
-        await sendWhatsAppReply(
-          incomingPhoneNumberId,
-          sender,
-          `👋 أهلًا بك في خدمة البلاغات الذكية (Salka).\nلإرسال بلاغ جديد، أرسل صورة المشكلة متبوعة بـ الموقع الجغرافي (Location).`
-        );
+        if (!insertErr) {
+          await sendWhatsAppReply(
+            incomingPhoneNumberId,
+            sender,
+            `👋 أهلًا بك في خدمة البلاغات الذكية (Salka).\nلإرسال بلاغ جديد، أرسل صورة المشكلة متبوعة بـ الموقع الجغرافي (Location).`
+          );
+        }
       }
     }
 
