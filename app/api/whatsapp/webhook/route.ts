@@ -18,7 +18,83 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 const VERIFY_TOKEN = (process.env.WHATSAPP_VERIFY_TOKEN || '').trim();
 const ACCESS_TOKEN = (process.env.WHATSAPP_ACCESS_TOKEN || '').trim();
 const FALLBACK_PHONE_ID = (process.env.WHATSAPP_PHONE_NUMBER_ID || '').trim();
+const GEMINI_API_KEY = (process.env.GEMINI_API_KEY || '').trim();
 const BUCKET_NAME = 'hazard-images';
+
+interface HazardAnalysis {
+  category: string;
+  severity: string;
+  description: string;
+}
+
+async function analyzeHazardWithGemini(
+  imageBuffer: Buffer,
+  mimeType: string
+): Promise<HazardAnalysis | null> {
+  if (!GEMINI_API_KEY) {
+    console.warn('Missing GEMINI_API_KEY for AI analysis');
+    return null;
+  }
+
+  try {
+    const base64Image = imageBuffer.toString('base64');
+    const prompt = `أنت خبير هندسي وميداني لتحليل بلاغات مخاطر الطرق والمرافق العامة.
+افحص هذه الصورة بدقة وأرجع النتيجة بصيغة JSON فقط باللغة العربية:
+1. category: اختر التصنيف الأنسب من (حفرة في الطريق، كسر ماسورة مياه، عمود إنارة تالف، تراكم مخلفات، أسلاك كهرباء مكشوفة، هبوط أرضي، أخرى).
+2. severity: اختر درجة الخطورة من (منخفضة، متوسطة، عالية، حرجة).
+3. description: وصف فني مختصر ودقيق في جملة واحدة لما يظهر في الصورة.`;
+
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [
+            {
+              parts: [
+                { text: prompt },
+                {
+                  inline_data: {
+                    mime_type: mimeType,
+                    data: base64Image,
+                  },
+                },
+              ],
+            },
+          ],
+          generationConfig: {
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: 'OBJECT',
+              properties: {
+                category: { type: 'STRING' },
+                severity: { type: 'STRING' },
+                description: { type: 'STRING' },
+              },
+              required: ['category', 'severity', 'description'],
+            },
+          },
+        }),
+      }
+    );
+
+    if (!res.ok) {
+      const errText = await res.text();
+      console.error('Gemini API error:', res.status, errText);
+      return null;
+    }
+
+    const data = await res.json();
+    const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!rawText) return null;
+
+    return JSON.parse(rawText) as HazardAnalysis;
+  } catch (err) {
+    console.error('Gemini analysis failed:', err);
+    return null;
+  }
+}
 
 async function sendWhatsAppReply(
   businessPhoneId: string,
@@ -26,10 +102,7 @@ async function sendWhatsAppReply(
   text: string
 ) {
   const activePhoneId = businessPhoneId || FALLBACK_PHONE_ID;
-  if (!ACCESS_TOKEN || !activePhoneId) {
-    console.warn('Missing ACCESS_TOKEN or activePhoneId for WhatsApp reply');
-    return;
-  }
+  if (!ACCESS_TOKEN || !activePhoneId) return;
 
   try {
     const res = await fetch(
@@ -50,8 +123,7 @@ async function sendWhatsAppReply(
     );
 
     if (!res.ok) {
-      const errText = await res.text();
-      console.error('WhatsApp reply failed:', res.status, errText);
+      console.error('WhatsApp reply failed:', res.status, await res.text());
     }
   } catch (err) {
     console.error('WhatsApp reply network error:', err);
@@ -69,7 +141,6 @@ export async function GET(req: NextRequest) {
   }
   return new NextResponse('Forbidden', { status: 403 });
 }
-
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
@@ -82,6 +153,7 @@ export async function POST(req: NextRequest) {
     if (!messages || messages.length === 0) {
       return NextResponse.json({ status: 'no_messages' }, { status: 200 });
     }
+
     for (const msg of messages) {
       const whatsappMessageId = msg.id;
       const sender = msg.from;
@@ -94,6 +166,7 @@ export async function POST(req: NextRequest) {
         let mediaStatus = 'none';
         let imageUrl: string | null = null;
         let processingError: string | null = null;
+        let aiResult: HazardAnalysis | null = null;
 
         if (!ACCESS_TOKEN) {
           mediaStatus = 'failed';
@@ -121,12 +194,16 @@ export async function POST(req: NextRequest) {
             const buffer = Buffer.from(await fileRes.arrayBuffer());
             const filePath = `${whatsappMessageId}.${ext}`;
 
-            const { error: uploadError } = await supabase.storage
-              .from(BUCKET_NAME)
-              .upload(filePath, buffer, { contentType: mimeType, upsert: true });
+            // تشغيل الرفع إلى التخزين وتحليل الذكاء الاصطناعي بالتوازي لتسريع الرد
+            const [uploadOutcome, analysisOutcome] = await Promise.all([
+              supabase.storage
+                .from(BUCKET_NAME)
+                .upload(filePath, buffer, { contentType: mimeType, upsert: true }),
+              analyzeHazardWithGemini(buffer, mimeType),
+            ]);
 
-            if (uploadError) {
-              throw new Error(`Supabase Storage error: ${uploadError.message}`);
+            if (uploadOutcome.error) {
+              throw new Error(`Supabase Storage error: ${uploadOutcome.error.message}`);
             }
 
             const { data: publicUrlData } = supabase.storage
@@ -135,11 +212,16 @@ export async function POST(req: NextRequest) {
 
             imageUrl = publicUrlData.publicUrl;
             mediaStatus = 'uploaded';
+            aiResult = analysisOutcome;
           } catch (err: any) {
             mediaStatus = 'failed';
             processingError = err?.message || 'Unknown media error';
           }
         }
+
+        const aiSummaryText = aiResult
+          ? `\n🔍 التصنيف: ${aiResult.category}\n⚠️ درجة الخطورة: ${aiResult.severity}\n📝 الوصف: ${aiResult.description}`
+          : '';
 
         const { data: pendingLocationReport } = await supabase
           .from('hazards')
@@ -166,13 +248,16 @@ export async function POST(req: NextRequest) {
               media_status: mediaStatus,
               image_url: imageUrl,
               processing_error: processingError,
+              hazard_category: aiResult?.category || null,
+              severity: aiResult?.severity || null,
+              ai_description: aiResult?.description || null,
             })
             .eq('id', pendingLocationReport.id);
 
           await sendWhatsAppReply(
             incomingPhoneNumberId,
             sender,
-            `✅ شكرًا لك! تم دمج الصورة مع الموقع واكتمال بلاغك بنجاح (رقم البلاغ #${pendingLocationReport.id}).`
+            `✅ شكرًا لك! تم دمج الصورة مع الموقع واكتمال بلاغك (رقم #${pendingLocationReport.id}).${aiSummaryText}`
           );
         } else {
           const { data: insertedRow } = await supabase
@@ -186,6 +271,9 @@ export async function POST(req: NextRequest) {
               media_status: mediaStatus,
               image_url: imageUrl,
               processing_error: processingError,
+              hazard_category: aiResult?.category || null,
+              severity: aiResult?.severity || null,
+              ai_description: aiResult?.description || null,
             })
             .select('id')
             .single();
@@ -194,7 +282,7 @@ export async function POST(req: NextRequest) {
           await sendWhatsAppReply(
             incomingPhoneNumberId,
             sender,
-            `📸 تم استلام صورة البلاغ بنجاح (رقم #${reportId}).\n📍 من فضلك أرسل الموقع الجغرافي (Location) الآن لإتمام البلاغ.`
+            `📸 تم استلام وتحليل صورة البلاغ (رقم #${reportId}).${aiSummaryText}\n\n📍 من فضلك أرسل الموقع الجغرافي (Location) الآن لإتمام البلاغ.`
           );
         }
       } else if (type === 'location') {
@@ -236,7 +324,7 @@ export async function POST(req: NextRequest) {
           await sendWhatsAppReply(
             incomingPhoneNumberId,
             sender,
-            `✅ شكرًا لك! تم تسجيل بلاغك بالكامل (رقم البلاغ #${pendingImageReport.id}) مرفقًا بالصورة والموقع الجغرافي.`
+            `✅ شكرًا لك! تم تسجيل بلاغك بالكامل (رقم البلاغ #${pendingImageReport.id}) مرفقًا بالصورة وتحليل الذكاء الاصطناعي والموقع الجغرافي.`
           );
         } else {
           const { data: insertedRow } = await supabase
@@ -274,7 +362,7 @@ export async function POST(req: NextRequest) {
         await sendWhatsAppReply(
           incomingPhoneNumberId,
           sender,
-          `👋 أهلًا بك في خدمة البلاغات (Salka).\nلإرسال بلاغ جديد، أرسل صورة المشكلة متبوعة بـ الموقع الجغرافي (Location).`
+          `👋 أهلًا بك في خدمة البلاغات الذكية (Salka).\nلإرسال بلاغ جديد، أرسل صورة المشكلة متبوعة بـ الموقع الجغرافي (Location).`
         );
       }
     }
