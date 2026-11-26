@@ -1,607 +1,444 @@
-'use client';
+import { NextRequest, NextResponse } from 'next/server';
+import { createClient } from '@supabase/supabase-js';
 
-import React, { useEffect, useState } from 'react';
+const supabaseUrl = (
+  process.env.NEXT_PUBLIC_SUPABASE_URL ||
+  process.env.SUPABASE_URL ||
+  ''
+).trim();
 
-interface Hazard {
-  id: number;
-  created_at: string;
-  sender: string;
-  message: string;
-  image_url: string | null;
-  latitude: number | null;
-  longitude: number | null;
-  location_name: string | null;
-  hazard_category: string | null;
-  severity: string | null;
-  ai_description: string | null;
-  status: string;
+const supabaseKey = (
+  process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+  ''
+).trim();
+
+const supabase = createClient(supabaseUrl, supabaseKey);
+
+const VERIFY_TOKEN = (process.env.WHATSAPP_VERIFY_TOKEN || '').trim();
+const ACCESS_TOKEN = (process.env.WHATSAPP_ACCESS_TOKEN || '').trim();
+const FALLBACK_PHONE_ID = (process.env.WHATSAPP_PHONE_NUMBER_ID || '').trim();
+const GEMINI_API_KEY = (process.env.GEMINI_API_KEY || '').trim();
+const BUCKET_NAME = 'hazard-images';
+
+interface HazardAnalysis {
+  category: string;
+  severity: string;
+  description: string;
 }
 
-export default function DashboardPage() {
-  const [hazards, setHazards] = useState<Hazard[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [filterSeverity, setFilterSeverity] = useState('الكل');
-  const [filterStatus, setFilterStatus] = useState('الكل');
-  const [updatingId, setUpdatingId] = useState<number | null>(null);
-  const [toastMsg, setToastMsg] = useState<string | null>(null);
+async function analyzeHazardWithGemini(
+  imageBuffer: Buffer,
+  mimeType: string
+): Promise<{ result: HazardAnalysis | null; error: string | null }> {
+  if (!GEMINI_API_KEY) {
+    return { result: null, error: 'Missing GEMINI_API_KEY' };
+  }
 
-  const fetchHazards = async () => {
-    setLoading(true);
+  const base64Image = imageBuffer.toString('base64');
+  const prompt = `أنت خبير هندسي وميداني لتحليل بلاغات مخاطر الطرق والمرافق العامة.
+افحص هذه الصورة بدقة وأرجع النتيجة بصيغة JSON فقط بهذا الشكل الدقيق دون أي نص إضافي:
+{
+  "category": "اختر التصنيف الأنسب من: حفرة في الطريق، كسر ماسورة مياه، عمود إنارة تالف، تراكم مخلفات، أسلاك كهرباء مكشوفة، هبوط أرضي، أخرى",
+  "severity": "اختر درجة الخطورة من: منخفضة، متوسطة، عالية، حرجة",
+  "description": "وصف فني مختصر ودقيق باللغة العربية في جملة واحدة لما يظهر في الصورة"
+}`;
+
+  const modelsToTry = [
+    'gemini-2.5-flash',
+    'gemini-2.5-flash-lite',
+    'gemini-3.8-flash',
+    'gemini-3.7-flash',
+    'gemini-3.5-flash-lite',
+  ];
+
+  let lastError = 'Unknown Gemini error';
+
+  for (const model of modelsToTry) {
     try {
-      const res = await fetch('/api/hazards');
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [
+              {
+                parts: [
+                  { text: prompt },
+                  {
+                    inline_data: {
+                      mime_type: mimeType,
+                      data: base64Image,
+                    },
+                  },
+                ],
+              },
+            ],
+            generationConfig: {
+              responseMimeType: 'application/json',
+            },
+          }),
+        }
+      );
+
+      if (!res.ok) {
+        const errText = await res.text();
+        lastError = `${model} (${res.status}): ${errText.slice(0, 180)}`;
+        if (res.status === 503 || res.status === 429 || res.status === 404) {
+          continue;
+        }
+        return { result: null, error: lastError };
+      }
+
       const data = await res.json();
-      if (data.hazards) {
-        setHazards(data.hazards);
+      const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!rawText) {
+        lastError = `${model}: Empty response`;
+        continue;
       }
-    } catch (error) {
-      console.error('Failed to load hazards:', error);
-    } finally {
-      setLoading(false);
+
+      const cleanJson = rawText.replace(/```json|```/g, '').trim();
+      const parsed = JSON.parse(cleanJson) as HazardAnalysis;
+      return { result: parsed, error: null };
+    } catch (err: any) {
+      lastError = `${model} exception: ${err?.message || 'Unknown'}`;
     }
-  };
+  }
 
-  useEffect(() => {
-    fetchHazards();
-  }, []);
+  return { result: null, error: lastError };
+}
 
-  const handleStatusChange = async (id: number, newStatus: string) => {
-    setUpdatingId(id);
-    try {
-      const res = await fetch('/api/hazards', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id, status: newStatus }),
-      });
-      if (res.ok) {
-        setHazards((prev) =>
-          prev.map((h) => (h.id === id ? { ...h, status: newStatus } : h))
-        );
-        setToastMsg(`✅ تم تحديث حالة البلاغ #${id} إلى "${newStatus}" وإشعار المُبلّغ.`);
-        setTimeout(() => setToastMsg(null), 4000);
+async function sendWhatsAppReply(
+  businessPhoneId: string,
+  to: string,
+  text: string
+) {
+  const activePhoneId = businessPhoneId || FALLBACK_PHONE_ID;
+  if (!ACCESS_TOKEN || !activePhoneId || !to) return;
+
+  try {
+    const isBsuid = !/^\d+$/.test(to);
+    const payload: Record<string, any> = {
+      messaging_product: 'whatsapp',
+      type: 'text',
+      text: { body: text },
+    };
+
+    if (isBsuid) {
+      payload.recipient_type = 'individual';
+      payload.to = to;
+    } else {
+      payload.to = to;
+    }
+
+    const res = await fetch(
+      `https://graph.facebook.com/v21.0/${activePhoneId}/messages`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${ACCESS_TOKEN}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
       }
-    } finally {
-      setUpdatingId(null);
+    );
+
+    if (!res.ok) {
+      console.error('WhatsApp reply failed:', res.status, await res.text());
     }
-  };
+  } catch (err) {
+    console.error('WhatsApp reply network error:', err);
+  }
+}
 
-  const getSeverityStyle = (severity: string | null): React.CSSProperties => {
-    switch (severity) {
-      case 'حرجة':
-        return { backgroundColor: '#dc2626', color: '#ffffff' };
-      case 'عالية':
-        return { backgroundColor: '#ea580c', color: '#ffffff' };
-      case 'متوسطة':
-        return { backgroundColor: '#eab308', color: '#111827' };
-      case 'منخفضة':
-        return { backgroundColor: '#16a34a', color: '#ffffff' };
-      default:
-        return { backgroundColor: '#e2e8f0', color: '#475569' };
+export async function GET(req: NextRequest) {
+  const { searchParams } = new URL(req.url);
+  const mode = searchParams.get('hub.mode');
+  const token = searchParams.get('hub.verify_token');
+  const challenge = searchParams.get('hub.challenge');
+
+  if (mode === 'subscribe' && token === VERIFY_TOKEN) {
+    return new NextResponse(challenge, { status: 200 });
+  }
+  return new NextResponse('Forbidden', { status: 403 });
+}
+
+export async function POST(req: NextRequest) {
+  try {
+    const body = await req.json();
+    const entry = body?.entry?.[0];
+    const changes = entry?.changes?.[0];
+    const value = changes?.value;
+    const messages = value?.messages;
+    const contacts = value?.contacts;
+    const incomingPhoneNumberId = value?.metadata?.phone_number_id || '';
+
+    if (!messages || messages.length === 0) {
+      return NextResponse.json({ status: 'no_messages' }, { status: 200 });
     }
-  };
 
-  const getStatusBorderColor = (status: string): string => {
-    switch (status) {
-      case 'تم الحل':
-        return '#10b981';
-      case 'قيد المعالجة':
-        return '#3b82f6';
-      default:
-        return '#e2e8f0';
+    for (const msg of messages) {
+      const whatsappMessageId = msg.id;
+      const contact = contacts?.[0];
+      const sender =
+        msg.from ||
+        contact?.wa_id ||
+        msg.from_user_id ||
+        contact?.user_id ||
+        '';
+      const type = msg.type;
+      const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+
+      const { data: existingMsg } = await supabase
+        .from('hazards')
+        .select('id')
+        .eq('whatsapp_message_id', whatsappMessageId)
+        .maybeSingle();
+
+      if (existingMsg) {
+        continue;
+      }
+
+      if (type === 'image') {
+        const whatsappMediaId = msg.image?.id || null;
+        const captionText = msg.image?.caption || 'Image hazard report';
+
+        const { data: pendingLocationReport } = await supabase
+          .from('hazards')
+          .select('id, message')
+          .eq('sender', sender)
+          .eq('media_status', 'none')
+          .not('latitude', 'is', null)
+          .gte('created_at', fiveMinutesAgo)
+          .order('id', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        let targetReportId: number | null = pendingLocationReport?.id || null;
+        const isMergingWithLocation = Boolean(pendingLocationReport);
+
+        if (isMergingWithLocation && targetReportId) {
+          await supabase
+            .from('hazards')
+            .update({
+              whatsapp_message_id: whatsappMessageId,
+              whatsapp_media_id: whatsappMediaId,
+              media_status: 'processing',
+            })
+            .eq('id', targetReportId);
+        } else {
+          const { data: createdRow, error: insertErr } = await supabase
+            .from('hazards')
+            .insert({
+              whatsapp_message_id: whatsappMessageId,
+              sender,
+              message: captionText,
+              raw_payload: msg,
+              whatsapp_media_id: whatsappMediaId,
+              media_status: 'processing',
+            })
+            .select('id')
+            .single();
+
+          if (insertErr || !createdRow) {
+            continue;
+          }
+          targetReportId = createdRow.id;
+        }
+
+        let mediaStatus = 'failed';
+        let imageUrl: string | null = null;
+        let processingError: string | null = null;
+        let aiResult: HazardAnalysis | null = null;
+
+        if (!ACCESS_TOKEN) {
+          processingError = 'Missing WHATSAPP_ACCESS_TOKEN';
+        } else if (whatsappMediaId) {
+          try {
+            const metaRes = await fetch(
+              `https://graph.facebook.com/v21.0/${whatsappMediaId}`,
+              { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } }
+            );
+            if (!metaRes.ok) {
+              throw new Error(`Meta API ${metaRes.status}: ${await metaRes.text()}`);
+            }
+            const metaData = await metaRes.json();
+            const mimeType = metaData.mime_type || 'image/jpeg';
+            const ext = mimeType.split('/')[1]?.split(';')[0] || 'jpg';
+
+            const fileRes = await fetch(metaData.url, {
+              headers: { Authorization: `Bearer ${ACCESS_TOKEN}` },
+            });
+            if (!fileRes.ok) {
+              throw new Error(`Media download failed: ${fileRes.status}`);
+            }
+
+            const buffer = Buffer.from(await fileRes.arrayBuffer());
+            const filePath = `${whatsappMessageId}.${ext}`;
+
+            const [uploadOutcome, analysisOutcome] = await Promise.all([
+              supabase.storage
+                .from(BUCKET_NAME)
+                .upload(filePath, buffer, { contentType: mimeType, upsert: true }),
+              analyzeHazardWithGemini(buffer, mimeType),
+            ]);
+
+            if (uploadOutcome.error) {
+              throw new Error(`Supabase Storage error: ${uploadOutcome.error.message}`);
+            }
+
+            const { data: publicUrlData } = supabase.storage
+              .from(BUCKET_NAME)
+              .getPublicUrl(filePath);
+
+            imageUrl = publicUrlData.publicUrl;
+            mediaStatus = 'uploaded';
+            aiResult = analysisOutcome.result;
+            if (analysisOutcome.error) {
+              processingError = `AI: ${analysisOutcome.error}`;
+            }
+          } catch (err: any) {
+            mediaStatus = 'failed';
+            processingError = err?.message || 'Unknown media error';
+          }
+        }
+
+        const { data: currentRow } = await supabase
+          .from('hazards')
+          .select('id, message, latitude')
+          .eq('id', targetReportId)
+          .single();
+
+        const updatedMsg =
+          isMergingWithLocation &&
+          captionText !== 'Image hazard report' &&
+          pendingLocationReport
+            ? `${captionText} | ${pendingLocationReport.message}`
+            : currentRow?.message || captionText;
+
+        await supabase
+          .from('hazards')
+          .update({
+            message: updatedMsg,
+            media_status: mediaStatus,
+            image_url: imageUrl,
+            processing_error: processingError,
+            hazard_category: aiResult?.category || null,
+            severity: aiResult?.severity || null,
+            ai_description: aiResult?.description || null,
+          })
+          .eq('id', targetReportId);
+
+        const aiSummaryText = aiResult
+          ? `\n🔍 التصنيف: ${aiResult.category}\n⚠️ درجة الخطورة: ${aiResult.severity}\n📝 الوصف: ${aiResult.description}`
+          : '';
+
+        const hasLocationNow = Boolean(currentRow?.latitude);
+
+        if (hasLocationNow) {
+          await sendWhatsAppReply(
+            incomingPhoneNumberId,
+            sender,
+            `✅ شكرًا لك! تم دمج الصورة مع الموقع واكتمال بلاغك (رقم #${targetReportId}).${aiSummaryText}`
+          );
+        } else {
+          await sendWhatsAppReply(
+            incomingPhoneNumberId,
+            sender,
+            `📸 تم استلام وتحليل صورة البلاغ (رقم #${targetReportId}).${aiSummaryText}\n\n📍 من فضلك أرسل الموقع الجغرافي (Location) الآن لإتمام البلاغ.`
+          );
+        }
+      } else if (type === 'location') {
+        const latitude = msg.location?.latitude ?? null;
+        const longitude = msg.location?.longitude ?? null;
+        const locationName = msg.location?.name || msg.location?.address || null;
+        const locText = locationName
+          ? `Location: ${locationName} (${latitude}, ${longitude})`
+          : `Location shared (${latitude}, ${longitude})`;
+
+        const { data: pendingImageReport } = await supabase
+          .from('hazards')
+          .select('id, message, media_status')
+          .eq('sender', sender)
+          .is('latitude', null)
+          .in('media_status', ['uploaded', 'processing'])
+          .gte('created_at', fiveMinutesAgo)
+          .order('id', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (pendingImageReport) {
+          const mergedMsg =
+            pendingImageReport.message &&
+            pendingImageReport.message !== 'Image hazard report'
+              ? `${pendingImageReport.message} | ${locText}`
+              : locText;
+
+          await supabase
+            .from('hazards')
+            .update({
+              message: mergedMsg,
+              latitude,
+              longitude,
+              location_name: locationName,
+            })
+            .eq('id', pendingImageReport.id);
+
+          if (pendingImageReport.media_status === 'uploaded') {
+            await sendWhatsAppReply(
+              incomingPhoneNumberId,
+              sender,
+              `✅ شكرًا لك! تم تسجيل بلاغك بالكامل (رقم البلاغ #${pendingImageReport.id}) مرفقًا بالصورة وتحليل الذكاء الاصطناعي والموقع الجغرافي.`
+            );
+          }
+        } else {
+          const { data: insertedRow, error: insertErr } = await supabase
+            .from('hazards')
+            .insert({
+              whatsapp_message_id: whatsappMessageId,
+              sender,
+              message: locText,
+              raw_payload: msg,
+              latitude,
+              longitude,
+              location_name: locationName,
+              media_status: 'none',
+            })
+            .select('id')
+            .single();
+
+          if (!insertErr && insertedRow) {
+            await sendWhatsAppReply(
+              incomingPhoneNumberId,
+              sender,
+              `📍 تم استلام الموقع الجغرافي بنجاح (رقم #${insertedRow.id}).\n📸 من فضلك أرسل صورة للمشكلة الآن لإتمام البلاغ.`
+            );
+          }
+        }
+      } else if (type === 'text') {
+        const messageText = msg.text?.body || '';
+        const { error: insertErr } = await supabase.from('hazards').insert({
+          whatsapp_message_id: whatsappMessageId,
+          sender,
+          message: messageText,
+          raw_payload: msg,
+          media_status: 'none',
+        });
+
+        if (!insertErr) {
+          await sendWhatsAppReply(
+            incomingPhoneNumberId,
+            sender,
+            `👋 أهلًا بك في خدمة البلاغات الذكية (Salka).\nلإرسال بلاغ جديد، أرسل صورة المشكلة متبوعة بـ الموقع الجغرافي (Location).`
+          );
+        }
+      }
     }
-  };
 
-  const filteredHazards = hazards.filter((h) => {
-    const matchSeverity =
-      filterSeverity === 'الكل' || h.severity === filterSeverity;
-    const matchStatus = filterStatus === 'الكل' || h.status === filterStatus;
-    return matchSeverity && matchStatus;
-  });
-
-  const stats = {
-    total: hazards.length,
-    high: hazards.filter((h) => h.severity === 'عالية' || h.severity === 'حرجة')
-      .length,
-    pending: hazards.filter((h) => h.status !== 'تم الحل').length,
-    resolved: hazards.filter((h) => h.status === 'تم الحل').length,
-  };
-
-  return (
-    <div
-      dir="rtl"
-      style={{
-        minHeight: '100vh',
-        backgroundColor: '#f1f5f9',
-        color: '#0f172a',
-        padding: '20px 16px 48px',
-        fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, sans-serif',
-      }}
-    >
-      <div style={{ maxWidth: '1200px', margin: '0 auto' }}>
-        {/* Toast Notification */}
-        {toastMsg && (
-          <div
-            style={{
-              position: 'fixed',
-              bottom: '20px',
-              left: '50%',
-              transform: 'translateX(-50%)',
-              backgroundColor: '#0f172a',
-              color: '#ffffff',
-              padding: '12px 20px',
-              borderRadius: '12px',
-              boxShadow: '0 10px 25px rgba(0,0,0,0.2)',
-              zIndex: 1000,
-              fontSize: '14px',
-              fontWeight: 600,
-              textAlign: 'center',
-              maxWidth: '90vw',
-            }}
-          >
-            {toastMsg}
-          </div>
-        )}
-
-        {/* Header */}
-        <div
-          style={{
-            display: 'flex',
-            flexWrap: 'wrap',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            gap: '16px',
-            marginBottom: '24px',
-            backgroundColor: '#ffffff',
-            padding: '20px 24px',
-            borderRadius: '16px',
-            boxShadow: '0 1px 3px rgba(0,0,0,0.06)',
-          }}
-        >
-          <div>
-            <h1 style={{ margin: 0, fontSize: '22px', fontWeight: 800, color: '#0f172a' }}>
-              🚦 لوحة تحكم البلاغات الذكية (Salka)
-            </h1>
-            <p style={{ margin: '6px 0 0', fontSize: '13px', color: '#64748b' }}>
-              إدارة ومتابعة بلاغات الطرق والمرافق المحللة بالذكاء الاصطناعي عبر واتساب
-            </p>
-          </div>
-          <button
-            onClick={fetchHazards}
-            style={{
-              backgroundColor: '#0f172a',
-              color: '#ffffff',
-              border: 'none',
-              padding: '10px 18px',
-              borderRadius: '10px',
-              fontSize: '14px',
-              fontWeight: 600,
-              cursor: 'pointer',
-            }}
-          >
-            🔄 تحديث البيانات
-          </button>
-        </div>
-
-        {/* Stats Grid */}
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))',
-            gap: '14px',
-            marginBottom: '24px',
-          }}
-        >
-          <div
-            style={{
-              backgroundColor: '#ffffff',
-              padding: '18px',
-              borderRadius: '14px',
-              boxShadow: '0 1px 3px rgba(0,0,0,0.05)',
-              borderRight: '4px solid #0f172a',
-            }}
-          >
-            <div style={{ fontSize: '12px', color: '#64748b', fontWeight: 600 }}>
-              إجمالي البلاغات
-            </div>
-            <div style={{ fontSize: '26px', fontWeight: 800, marginTop: '6px' }}>
-              {stats.total}
-            </div>
-          </div>
-
-          <div
-            style={{
-              backgroundColor: '#ffffff',
-              padding: '18px',
-              borderRadius: '14px',
-              boxShadow: '0 1px 3px rgba(0,0,0,0.05)',
-              borderRight: '4px solid #ea580c',
-            }}
-          >
-            <div style={{ fontSize: '12px', color: '#64748b', fontWeight: 600 }}>
-              خطورة عالية / حرجة
-            </div>
-            <div
-              style={{
-                fontSize: '26px',
-                fontWeight: 800,
-                marginTop: '6px',
-                color: '#ea580c',
-              }}
-            >
-              {stats.high}
-            </div>
-          </div>
-
-          <div
-            style={{
-              backgroundColor: '#ffffff',
-              padding: '18px',
-              borderRadius: '14px',
-              boxShadow: '0 1px 3px rgba(0,0,0,0.05)',
-              borderRight: '4px solid #2563eb',
-            }}
-          >
-            <div style={{ fontSize: '12px', color: '#64748b', fontWeight: 600 }}>
-              قيد المتابعة
-            </div>
-            <div
-              style={{
-                fontSize: '26px',
-                fontWeight: 800,
-                marginTop: '6px',
-                color: '#2563eb',
-              }}
-            >
-              {stats.pending}
-            </div>
-          </div>
-
-          <div
-            style={{
-              backgroundColor: '#ffffff',
-              padding: '18px',
-              borderRadius: '14px',
-              boxShadow: '0 1px 3px rgba(0,0,0,0.05)',
-              borderRight: '4px solid #10b981',
-            }}
-          >
-            <div style={{ fontSize: '12px', color: '#64748b', fontWeight: 600 }}>
-              تم الحل
-            </div>
-            <div
-              style={{
-                fontSize: '26px',
-                fontWeight: 800,
-                marginTop: '6px',
-                color: '#10b981',
-              }}
-            >
-              {stats.resolved}
-            </div>
-          </div>
-        </div>
-
-        {/* Filters */}
-        <div
-          style={{
-            backgroundColor: '#ffffff',
-            padding: '16px 20px',
-            borderRadius: '14px',
-            boxShadow: '0 1px 3px rgba(0,0,0,0.05)',
-            marginBottom: '24px',
-            display: 'flex',
-            flexWrap: 'wrap',
-            gap: '16px',
-            alignItems: 'center',
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <label style={{ fontSize: '13px', fontWeight: 700, color: '#475569' }}>
-              درجة الخطورة:
-            </label>
-            <select
-              value={filterSeverity}
-              onChange={(e) => setFilterSeverity(e.target.value)}
-              style={{
-                border: '1px solid #cbd5e1',
-                borderRadius: '8px',
-                padding: '6px 12px',
-                fontSize: '13px',
-                backgroundColor: '#f8fafc',
-              }}
-            >
-              <option value="الكل">الكل</option>
-              <option value="حرجة">حرجة</option>
-              <option value="عالية">عالية</option>
-              <option value="متوسطة">متوسطة</option>
-              <option value="منخفضة">منخفضة</option>
-            </select>
-          </div>
-
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <label style={{ fontSize: '13px', fontWeight: 700, color: '#475569' }}>
-              حالة البلاغ:
-            </label>
-            <select
-              value={filterStatus}
-              onChange={(e) => setFilterStatus(e.target.value)}
-              style={{
-                border: '1px solid #cbd5e1',
-                borderRadius: '8px',
-                padding: '6px 12px',
-                fontSize: '13px',
-                backgroundColor: '#f8fafc',
-              }}
-            >
-              <option value="الكل">الكل</option>
-              <option value="جديد">جديد</option>
-              <option value="قيد المعالجة">قيد المعالجة</option>
-              <option value="تم الحل">تم الحل</option>
-            </select>
-          </div>
-        </div>
-
-        {/* Cards Grid */}
-        {loading ? (
-          <div
-            style={{
-              textAlign: 'center',
-              padding: '48px',
-              backgroundColor: '#ffffff',
-              borderRadius: '16px',
-              color: '#64748b',
-            }}
-          >
-            جاري تحميل البلاغات...
-          </div>
-        ) : filteredHazards.length === 0 ? (
-          <div
-            style={{
-              textAlign: 'center',
-              padding: '48px',
-              backgroundColor: '#ffffff',
-              borderRadius: '16px',
-              color: '#64748b',
-            }}
-          >
-            لا توجد بلاغات مطابقة للفلتر المحدد.
-          </div>
-        ) : (
-          <div
-            style={{
-              display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fill, minmax(310px, 1fr))',
-              gap: '20px',
-            }}
-          >
-            {filteredHazards.map((hazard) => (
-              <div
-                key={hazard.id}
-                style={{
-                  backgroundColor: '#ffffff',
-                  borderRadius: '16px',
-                  boxShadow: '0 4px 12px rgba(0,0,0,0.06)',
-                  overflow: 'hidden',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  borderTop: `4px solid ${getStatusBorderColor(hazard.status)}`,
-                }}
-              >
-                {/* Image Wrapper */}
-                <div
-                  style={{
-                    position: 'relative',
-                    height: '210px',
-                    backgroundColor: '#e2e8f0',
-                  }}
-                >
-                  {hazard.image_url ? (
-                    <img
-                      src={hazard.image_url}
-                      alt={hazard.hazard_category || 'بلاغ'}
-                      style={{
-                        width: '100%',
-                        height: '100%',
-                        objectFit: 'cover',
-                        display: 'block',
-                      }}
-                    />
-                  ) : (
-                    <div
-                      style={{
-                        width: '100%',
-                        height: '100%',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        color: '#94a3b8',
-                        fontSize: '14px',
-                      }}
-                    >
-                      لا توجد صورة
-                    </div>
-                  )}
-
-                  {/* ID Badge */}
-                  <span
-                    style={{
-                      position: 'absolute',
-                      top: '12px',
-                      right: '12px',
-                      backgroundColor: 'rgba(15, 23, 42, 0.85)',
-                      color: '#ffffff',
-                      fontSize: '12px',
-                      fontWeight: 700,
-                      padding: '4px 10px',
-                      borderRadius: '20px',
-                    }}
-                  >
-                    #{hazard.id}
-                  </span>
-
-                  {/* Severity Badge */}
-                  {hazard.severity && (
-                    <span
-                      style={{
-                        position: 'absolute',
-                        top: '12px',
-                        left: '12px',
-                        fontSize: '12px',
-                        fontWeight: 700,
-                        padding: '4px 12px',
-                        borderRadius: '20px',
-                        boxShadow: '0 2px 6px rgba(0,0,0,0.2)',
-                        ...getSeverityStyle(hazard.severity),
-                      }}
-                    >
-                      {hazard.severity}
-                    </span>
-                  )}
-                </div>
-
-                {/* Card Body */}
-                <div
-                  style={{
-                    padding: '18px',
-                    flex: 1,
-                    display: 'flex',
-                    flexDirection: 'column',
-                    justifyContent: 'space-between',
-                  }}
-                >
-                  <div>
-                    <div
-                      style={{
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'center',
-                        gap: '8px',
-                        marginBottom: '8px',
-                      }}
-                    >
-                      <h2
-                        style={{
-                          margin: 0,
-                          fontSize: '17px',
-                          fontWeight: 800,
-                          color: '#0f172a',
-                        }}
-                      >
-                        {hazard.hazard_category || 'بلاغ غير مصنف'}
-                      </h2>
-                      <span style={{ fontSize: '11px', color: '#94a3b8' }}>
-                        {new Date(hazard.created_at).toLocaleDateString('ar-EG', {
-                          month: 'short',
-                          day: 'numeric',
-                          hour: '2-digit',
-                          minute: '2-digit',
-                        })}
-                      </span>
-                    </div>
-
-                    <p
-                      style={{
-                        margin: '0 0 16px',
-                        fontSize: '13.5px',
-                        color: '#475569',
-                        lineHeight: 1.6,
-                      }}
-                    >
-                      {hazard.ai_description || hazard.message}
-                    </p>
-                  </div>
-
-                  {/* Card Footer */}
-                  <div
-                    style={{
-                      paddingTop: '14px',
-                      borderTop: '1px solid #f1f5f9',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      gap: '10px',
-                    }}
-                  >
-                    {hazard.latitude && hazard.longitude ? (
-                      <a
-                        href={`https://www.google.com/maps?q=${hazard.latitude},${hazard.longitude}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        style={{
-                          display: 'block',
-                          textAlign: 'center',
-                          backgroundColor: '#eff6ff',
-                          color: '#1d4ed8',
-                          textDecoration: 'none',
-                          fontSize: '13px',
-                          fontWeight: 700,
-                          padding: '9px 12px',
-                          borderRadius: '10px',
-                        }}
-                      >
-                        📍 فتح الموقع على خرائط Google
-                        {hazard.location_name ? ` (${hazard.location_name})` : ''}
-                      </a>
-                    ) : (
-                      <div
-                        style={{
-                          textAlign: 'center',
-                          backgroundColor: '#fffbeb',
-                          color: '#b45309',
-                          fontSize: '12px',
-                          fontWeight: 600,
-                          padding: '8px',
-                          borderRadius: '8px',
-                        }}
-                      >
-                        ⚠️ بانتظار إرسال الموقع الجغرافي
-                      </div>
-                    )}
-
-                    <div
-                      style={{
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'center',
-                        marginTop: '2px',
-                      }}
-                    >
-                      <span
-                        style={{
-                          fontSize: '13px',
-                          fontWeight: 700,
-                          color: '#64748b',
-                        }}
-                      >
-                        حالة البلاغ:
-                      </span>
-                      <select
-                        disabled={updatingId === hazard.id}
-                        value={hazard.status || 'جديد'}
-                        onChange={(e) =>
-                          handleStatusChange(hazard.id, e.target.value)
-                        }
-                        style={{
-                          border: '1px solid #cbd5e1',
-                          borderRadius: '8px',
-                          padding: '6px 12px',
-                          fontSize: '13px',
-                          fontWeight: 700,
-                          backgroundColor: '#f8fafc',
-                          color: '#0f172a',
-                          cursor: 'pointer',
-                        }}
-                      >
-                        <option value="جديد">🆕 جديد</option>
-                        <option value="قيد المعالجة">🛠️ قيد المعالجة</option>
-                        <option value="تم الحل">✅ تم الحل</option>
-                      </select>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    </div>
-  );
+    return NextResponse.json({ status: 'ok' }, { status: 200 });
+  } catch (error: any) {
+    console.error('Webhook POST error:', error);
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
 }
