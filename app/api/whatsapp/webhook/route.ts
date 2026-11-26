@@ -45,7 +45,7 @@ async function analyzeHazardWithGemini(
 3. description: وصف فني مختصر ودقيق في جملة واحدة لما يظهر في الصورة.`;
 
     const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${GEMINI_API_KEY}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -141,6 +141,7 @@ export async function GET(req: NextRequest) {
   }
   return new NextResponse('Forbidden', { status: 403 });
 }
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
@@ -194,7 +195,6 @@ export async function POST(req: NextRequest) {
             const buffer = Buffer.from(await fileRes.arrayBuffer());
             const filePath = `${whatsappMessageId}.${ext}`;
 
-            // تشغيل الرفع إلى التخزين وتحليل الذكاء الاصطناعي بالتوازي لتسريع الرد
             const [uploadOutcome, analysisOutcome] = await Promise.all([
               supabase.storage
                 .from(BUCKET_NAME)
