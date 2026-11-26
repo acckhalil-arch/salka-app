@@ -23,6 +23,7 @@ export default function DashboardPage() {
   const [filterSeverity, setFilterSeverity] = useState('الكل');
   const [filterStatus, setFilterStatus] = useState('الكل');
   const [updatingId, setUpdatingId] = useState<number | null>(null);
+  const [toastMsg, setToastMsg] = useState<string | null>(null);
 
   const fetchHazards = async () => {
     setLoading(true);
@@ -55,24 +56,37 @@ export default function DashboardPage() {
         setHazards((prev) =>
           prev.map((h) => (h.id === id ? { ...h, status: newStatus } : h))
         );
+        setToastMsg(`✅ تم تحديث حالة البلاغ #${id} إلى "${newStatus}" وإشعار المُبلّغ.`);
+        setTimeout(() => setToastMsg(null), 4000);
       }
     } finally {
       setUpdatingId(null);
     }
   };
 
-  const getSeverityBadge = (severity: string | null) => {
+  const getSeverityStyle = (severity: string | null): React.CSSProperties => {
     switch (severity) {
       case 'حرجة':
-        return 'bg-red-600 text-white';
+        return { backgroundColor: '#dc2626', color: '#ffffff' };
       case 'عالية':
-        return 'bg-orange-500 text-white';
+        return { backgroundColor: '#ea580c', color: '#ffffff' };
       case 'متوسطة':
-        return 'bg-yellow-400 text-gray-900';
+        return { backgroundColor: '#eab308', color: '#111827' };
       case 'منخفضة':
-        return 'bg-green-500 text-white';
+        return { backgroundColor: '#16a34a', color: '#ffffff' };
       default:
-        return 'bg-gray-200 text-gray-700';
+        return { backgroundColor: '#e2e8f0', color: '#475569' };
+    }
+  };
+
+  const getStatusBorderColor = (status: string): string => {
+    switch (status) {
+      case 'تم الحل':
+        return '#10b981';
+      case 'قيد المعالجة':
+        return '#3b82f6';
+      default:
+        return '#e2e8f0';
     }
   };
 
@@ -92,54 +106,208 @@ export default function DashboardPage() {
   };
 
   return (
-    <div dir="rtl" className="min-h-screen bg-slate-50 text-slate-900 p-4 md:p-8 font-sans">
-      <div className="max-w-7xl mx-auto">
+    <div
+      dir="rtl"
+      style={{
+        minHeight: '100vh',
+        backgroundColor: '#f1f5f9',
+        color: '#0f172a',
+        padding: '20px 16px 48px',
+        fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, sans-serif',
+      }}
+    >
+      <div style={{ maxWidth: '1200px', margin: '0 auto' }}>
+        {/* Toast Notification */}
+        {toastMsg && (
+          <div
+            style={{
+              position: 'fixed',
+              bottom: '20px',
+              left: '50%',
+              transform: 'translateX(-50%)',
+              backgroundColor: '#0f172a',
+              color: '#ffffff',
+              padding: '12px 20px',
+              borderRadius: '12px',
+              boxShadow: '0 10px 25px rgba(0,0,0,0.2)',
+              zIndex: 1000,
+              fontSize: '14px',
+              fontWeight: 600,
+              textAlign: 'center',
+              maxWidth: '90vw',
+            }}
+          >
+            {toastMsg}
+          </div>
+        )}
+
         {/* Header */}
-        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-8">
+        <div
+          style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            gap: '16px',
+            marginBottom: '24px',
+            backgroundColor: '#ffffff',
+            padding: '20px 24px',
+            borderRadius: '16px',
+            boxShadow: '0 1px 3px rgba(0,0,0,0.06)',
+          }}
+        >
           <div>
-            <h1 className="text-2xl md:text-3xl font-bold text-slate-800">
+            <h1 style={{ margin: 0, fontSize: '22px', fontWeight: 800, color: '#0f172a' }}>
               🚦 لوحة تحكم البلاغات الذكية (Salka)
             </h1>
-            <p className="text-slate-500 text-sm mt-1">
-              متابعة بلاغات الطرق والمرافق المحللة بالذكاء الاصطناعي عبر واتساب
+            <p style={{ margin: '6px 0 0', fontSize: '13px', color: '#64748b' }}>
+              إدارة ومتابعة بلاغات الطرق والمرافق المحللة بالذكاء الاصطناعي عبر واتساب
             </p>
           </div>
           <button
             onClick={fetchHazards}
-            className="self-start md:self-auto bg-slate-900 hover:bg-slate-800 text-white px-4 py-2.5 rounded-lg text-sm font-medium transition cursor-pointer"
+            style={{
+              backgroundColor: '#0f172a',
+              color: '#ffffff',
+              border: 'none',
+              padding: '10px 18px',
+              borderRadius: '10px',
+              fontSize: '14px',
+              fontWeight: 600,
+              cursor: 'pointer',
+            }}
           >
             🔄 تحديث البيانات
           </button>
         </div>
 
-        {/* Stats Cards */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
-          <div className="bg-white p-5 rounded-xl shadow-sm border border-slate-100">
-            <p className="text-xs text-slate-500 font-medium">إجمالي البلاغات</p>
-            <p className="text-2xl font-bold text-slate-800 mt-1">{stats.total}</p>
+        {/* Stats Grid */}
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))',
+            gap: '14px',
+            marginBottom: '24px',
+          }}
+        >
+          <div
+            style={{
+              backgroundColor: '#ffffff',
+              padding: '18px',
+              borderRadius: '14px',
+              boxShadow: '0 1px 3px rgba(0,0,0,0.05)',
+              borderRight: '4px solid #0f172a',
+            }}
+          >
+            <div style={{ fontSize: '12px', color: '#64748b', fontWeight: 600 }}>
+              إجمالي البلاغات
+            </div>
+            <div style={{ fontSize: '26px', fontWeight: 800, marginTop: '6px' }}>
+              {stats.total}
+            </div>
           </div>
-          <div className="bg-white p-5 rounded-xl shadow-sm border border-slate-100">
-            <p className="text-xs text-slate-500 font-medium">خطورة عالية / حرجة</p>
-            <p className="text-2xl font-bold text-orange-600 mt-1">{stats.high}</p>
+
+          <div
+            style={{
+              backgroundColor: '#ffffff',
+              padding: '18px',
+              borderRadius: '14px',
+              boxShadow: '0 1px 3px rgba(0,0,0,0.05)',
+              borderRight: '4px solid #ea580c',
+            }}
+          >
+            <div style={{ fontSize: '12px', color: '#64748b', fontWeight: 600 }}>
+              خطورة عالية / حرجة
+            </div>
+            <div
+              style={{
+                fontSize: '26px',
+                fontWeight: 800,
+                marginTop: '6px',
+                color: '#ea580c',
+              }}
+            >
+              {stats.high}
+            </div>
           </div>
-          <div className="bg-white p-5 rounded-xl shadow-sm border border-slate-100">
-            <p className="text-xs text-slate-500 font-medium">قيد المتابعة</p>
-            <p className="text-2xl font-bold text-blue-600 mt-1">{stats.pending}</p>
+
+          <div
+            style={{
+              backgroundColor: '#ffffff',
+              padding: '18px',
+              borderRadius: '14px',
+              boxShadow: '0 1px 3px rgba(0,0,0,0.05)',
+              borderRight: '4px solid #2563eb',
+            }}
+          >
+            <div style={{ fontSize: '12px', color: '#64748b', fontWeight: 600 }}>
+              قيد المتابعة
+            </div>
+            <div
+              style={{
+                fontSize: '26px',
+                fontWeight: 800,
+                marginTop: '6px',
+                color: '#2563eb',
+              }}
+            >
+              {stats.pending}
+            </div>
           </div>
-          <div className="bg-white p-5 rounded-xl shadow-sm border border-slate-100">
-            <p className="text-xs text-slate-500 font-medium">تم الحل</p>
-            <p className="text-2xl font-bold text-emerald-600 mt-1">{stats.resolved}</p>
+
+          <div
+            style={{
+              backgroundColor: '#ffffff',
+              padding: '18px',
+              borderRadius: '14px',
+              boxShadow: '0 1px 3px rgba(0,0,0,0.05)',
+              borderRight: '4px solid #10b981',
+            }}
+          >
+            <div style={{ fontSize: '12px', color: '#64748b', fontWeight: 600 }}>
+              تم الحل
+            </div>
+            <div
+              style={{
+                fontSize: '26px',
+                fontWeight: 800,
+                marginTop: '6px',
+                color: '#10b981',
+              }}
+            >
+              {stats.resolved}
+            </div>
           </div>
         </div>
 
         {/* Filters */}
-        <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-100 mb-6 flex flex-wrap gap-4 items-center">
-          <div className="flex items-center gap-2">
-            <label className="text-sm font-medium text-slate-600">درجة الخطورة:</label>
+        <div
+          style={{
+            backgroundColor: '#ffffff',
+            padding: '16px 20px',
+            borderRadius: '14px',
+            boxShadow: '0 1px 3px rgba(0,0,0,0.05)',
+            marginBottom: '24px',
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: '16px',
+            alignItems: 'center',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <label style={{ fontSize: '13px', fontWeight: 700, color: '#475569' }}>
+              درجة الخطورة:
+            </label>
             <select
               value={filterSeverity}
               onChange={(e) => setFilterSeverity(e.target.value)}
-              className="border border-slate-200 rounded-lg px-3 py-1.5 text-sm bg-white"
+              style={{
+                border: '1px solid #cbd5e1',
+                borderRadius: '8px',
+                padding: '6px 12px',
+                fontSize: '13px',
+                backgroundColor: '#f8fafc',
+              }}
             >
               <option value="الكل">الكل</option>
               <option value="حرجة">حرجة</option>
@@ -149,12 +317,20 @@ export default function DashboardPage() {
             </select>
           </div>
 
-          <div className="flex items-center gap-2">
-            <label className="text-sm font-medium text-slate-600">حالة البلاغ:</label>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <label style={{ fontSize: '13px', fontWeight: 700, color: '#475569' }}>
+              حالة البلاغ:
+            </label>
             <select
               value={filterStatus}
               onChange={(e) => setFilterStatus(e.target.value)}
-              className="border border-slate-200 rounded-lg px-3 py-1.5 text-sm bg-white"
+              style={{
+                border: '1px solid #cbd5e1',
+                borderRadius: '8px',
+                padding: '6px 12px',
+                fontSize: '13px',
+                backgroundColor: '#f8fafc',
+              }}
             >
               <option value="الكل">الكل</option>
               <option value="جديد">جديد</option>
@@ -164,55 +340,155 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {/* Reports Grid */}
+        {/* Cards Grid */}
         {loading ? (
-          <div className="text-center py-16 text-slate-500">جاري تحميل البلاغات...</div>
+          <div
+            style={{
+              textAlign: 'center',
+              padding: '48px',
+              backgroundColor: '#ffffff',
+              borderRadius: '16px',
+              color: '#64748b',
+            }}
+          >
+            جاري تحميل البلاغات...
+          </div>
         ) : filteredHazards.length === 0 ? (
-          <div className="text-center py-16 bg-white rounded-xl border border-slate-100 text-slate-500">
+          <div
+            style={{
+              textAlign: 'center',
+              padding: '48px',
+              backgroundColor: '#ffffff',
+              borderRadius: '16px',
+              color: '#64748b',
+            }}
+          >
             لا توجد بلاغات مطابقة للفلتر المحدد.
           </div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fill, minmax(310px, 1fr))',
+              gap: '20px',
+            }}
+          >
             {filteredHazards.map((hazard) => (
               <div
                 key={hazard.id}
-                className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden flex flex-col"
+                style={{
+                  backgroundColor: '#ffffff',
+                  borderRadius: '16px',
+                  boxShadow: '0 4px 12px rgba(0,0,0,0.06)',
+                  overflow: 'hidden',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  borderTop: `4px solid ${getStatusBorderColor(hazard.status)}`,
+                }}
               >
-                {/* Image */}
-                <div className="relative h-52 bg-slate-200">
+                {/* Image Wrapper */}
+                <div
+                  style={{
+                    position: 'relative',
+                    height: '210px',
+                    backgroundColor: '#e2e8f0',
+                  }}
+                >
                   {hazard.image_url ? (
                     <img
                       src={hazard.image_url}
                       alt={hazard.hazard_category || 'بلاغ'}
-                      className="w-full h-full object-cover"
+                      style={{
+                        width: '100%',
+                        height: '100%',
+                        objectFit: 'cover',
+                        display: 'block',
+                      }}
                     />
                   ) : (
-                    <div className="w-full h-full flex items-center justify-center text-slate-400 text-sm">
+                    <div
+                      style={{
+                        width: '100%',
+                        height: '100%',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        color: '#94a3b8',
+                        fontSize: '14px',
+                      }}
+                    >
                       لا توجد صورة
                     </div>
                   )}
-                  <span className="absolute top-3 right-3 bg-slate-900/80 text-white text-xs font-bold px-2.5 py-1 rounded-full">
+
+                  {/* ID Badge */}
+                  <span
+                    style={{
+                      position: 'absolute',
+                      top: '12px',
+                      right: '12px',
+                      backgroundColor: 'rgba(15, 23, 42, 0.85)',
+                      color: '#ffffff',
+                      fontSize: '12px',
+                      fontWeight: 700,
+                      padding: '4px 10px',
+                      borderRadius: '20px',
+                    }}
+                  >
                     #{hazard.id}
                   </span>
+
+                  {/* Severity Badge */}
                   {hazard.severity && (
                     <span
-                      className={`absolute top-3 left-3 text-xs font-bold px-3 py-1 rounded-full shadow-sm ${getSeverityBadge(
-                        hazard.severity
-                      )}`}
+                      style={{
+                        position: 'absolute',
+                        top: '12px',
+                        left: '12px',
+                        fontSize: '12px',
+                        fontWeight: 700,
+                        padding: '4px 12px',
+                        borderRadius: '20px',
+                        boxShadow: '0 2px 6px rgba(0,0,0,0.2)',
+                        ...getSeverityStyle(hazard.severity),
+                      }}
                     >
                       {hazard.severity}
                     </span>
                   )}
                 </div>
 
-                {/* Content */}
-                <div className="p-5 flex-1 flex flex-col justify-between">
+                {/* Card Body */}
+                <div
+                  style={{
+                    padding: '18px',
+                    flex: 1,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    justifyContent: 'space-between',
+                  }}
+                >
                   <div>
-                    <div className="flex items-center justify-between gap-2 mb-2">
-                      <h2 className="font-bold text-lg text-slate-800">
+                    <div
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        gap: '8px',
+                        marginBottom: '8px',
+                      }}
+                    >
+                      <h2
+                        style={{
+                          margin: 0,
+                          fontSize: '17px',
+                          fontWeight: 800,
+                          color: '#0f172a',
+                        }}
+                      >
                         {hazard.hazard_category || 'بلاغ غير مصنف'}
                       </h2>
-                      <span className="text-xs text-slate-400">
+                      <span style={{ fontSize: '11px', color: '#94a3b8' }}>
                         {new Date(hazard.created_at).toLocaleDateString('ar-EG', {
                           month: 'short',
                           day: 'numeric',
@@ -222,39 +498,97 @@ export default function DashboardPage() {
                       </span>
                     </div>
 
-                    <p className="text-sm text-slate-600 leading-relaxed mb-4">
+                    <p
+                      style={{
+                        margin: '0 0 16px',
+                        fontSize: '13.5px',
+                        color: '#475569',
+                        lineHeight: 1.6,
+                      }}
+                    >
                       {hazard.ai_description || hazard.message}
                     </p>
                   </div>
 
-                  <div className="pt-4 border-t border-slate-100 flex flex-col gap-3">
-                    {/* Location Link */}
+                  {/* Card Footer */}
+                  <div
+                    style={{
+                      paddingTop: '14px',
+                      borderTop: '1px solid #f1f5f9',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '10px',
+                    }}
+                  >
                     {hazard.latitude && hazard.longitude ? (
                       <a
                         href={`https://www.google.com/maps?q=${hazard.latitude},${hazard.longitude}`}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="inline-flex items-center justify-center gap-1.5 w-full bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs font-semibold py-2 px-3 rounded-lg transition"
+                        style={{
+                          display: 'block',
+                          textAlign: 'center',
+                          backgroundColor: '#eff6ff',
+                          color: '#1d4ed8',
+                          textDecoration: 'none',
+                          fontSize: '13px',
+                          fontWeight: 700,
+                          padding: '9px 12px',
+                          borderRadius: '10px',
+                        }}
                       >
                         📍 فتح الموقع على خرائط Google
                         {hazard.location_name ? ` (${hazard.location_name})` : ''}
                       </a>
                     ) : (
-                      <span className="text-xs text-amber-600 bg-amber-50 py-1.5 px-3 rounded-lg text-center">
+                      <div
+                        style={{
+                          textAlign: 'center',
+                          backgroundColor: '#fffbeb',
+                          color: '#b45309',
+                          fontSize: '12px',
+                          fontWeight: 600,
+                          padding: '8px',
+                          borderRadius: '8px',
+                        }}
+                      >
                         ⚠️ بانتظار إرسال الموقع الجغرافي
-                      </span>
+                      </div>
                     )}
 
-                    {/* Status Control */}
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-xs text-slate-500 font-medium">الحالة:</span>
+                    <div
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        marginTop: '2px',
+                      }}
+                    >
+                      <span
+                        style={{
+                          fontSize: '13px',
+                          fontWeight: 700,
+                          color: '#64748b',
+                        }}
+                      >
+                        حالة البلاغ:
+                      </span>
                       <select
                         disabled={updatingId === hazard.id}
                         value={hazard.status || 'جديد'}
                         onChange={(e) =>
                           handleStatusChange(hazard.id, e.target.value)
                         }
-                        className="border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs font-semibold bg-slate-50 text-slate-800 cursor-pointer"
+                        style={{
+                          border: '1px solid #cbd5e1',
+                          borderRadius: '8px',
+                          padding: '6px 12px',
+                          fontSize: '13px',
+                          fontWeight: 700,
+                          backgroundColor: '#f8fafc',
+                          color: '#0f172a',
+                          cursor: 'pointer',
+                        }}
                       >
                         <option value="جديد">🆕 جديد</option>
                         <option value="قيد المعالجة">🛠️ قيد المعالجة</option>
