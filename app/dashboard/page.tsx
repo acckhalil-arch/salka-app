@@ -21,7 +21,8 @@ export default function DashboardPage() {
   const [hazards, setHazards] = useState<Hazard[]>([]);
   const [loading, setLoading] = useState(true);
   const [filterSeverity, setFilterSeverity] = useState('الكل');
-  const [filterStatus, setFilterStatus] = useState('الكل');
+  // العرض الافتراضي يعرض البلاغات النشطة فقط (يخفي "تم الحل")
+  const [filterStatus, setFilterStatus] = useState('النشطة');
   const [updatingId, setUpdatingId] = useState<number | null>(null);
   const [deletingId, setDeletingId] = useState<number | null>(null);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
@@ -64,6 +65,8 @@ export default function DashboardPage() {
         );
         if (newStatus === 'بلاغ غير صحيح') {
           showToast(`🚫 تم تصنيف البلاغ #${id} كبلاغ غير صحيح / لا يوجد به خطر.`);
+        } else if (newStatus === 'تم الحل') {
+          showToast(`✅ تم حل البلاغ #${id} وإشعار المُبلّغ، وتمت أرشفته من القائمة النشطة.`);
         } else {
           showToast(`✅ تم تحديث حالة البلاغ #${id} إلى "${newStatus}" وإشعار المُبلّغ.`);
         }
@@ -126,7 +129,14 @@ export default function DashboardPage() {
   const filteredHazards = hazards.filter((h) => {
     const matchSeverity =
       filterSeverity === 'الكل' || h.severity === filterSeverity;
-    const matchStatus = filterStatus === 'الكل' || h.status === filterStatus;
+
+    let matchStatus = true;
+    if (filterStatus === 'النشطة') {
+      matchStatus = h.status !== 'تم الحل' && h.status !== 'بلاغ غير صحيح';
+    } else if (filterStatus !== 'الكل') {
+      matchStatus = h.status === filterStatus;
+    }
+
     return matchSeverity && matchStatus;
   });
 
@@ -134,8 +144,11 @@ export default function DashboardPage() {
 
   const stats = {
     total: validHazards.length,
-    high: validHazards.filter((h) => h.severity === 'عالية' || h.severity === 'حرجة')
-      .length,
+    high: validHazards.filter(
+      (h) =>
+        (h.severity === 'عالية' || h.severity === 'حرجة') &&
+        h.status !== 'تم الحل'
+    ).length,
     pending: validHazards.filter((h) => h.status !== 'تم الحل').length,
     resolved: validHazards.filter((h) => h.status === 'تم الحل').length,
   };
@@ -176,7 +189,7 @@ export default function DashboardPage() {
           </div>
         )}
 
-        {/* Header */}
+        {/* Header with Salka Logo */}
         <div
           style={{
             display: 'flex',
@@ -186,19 +199,35 @@ export default function DashboardPage() {
             gap: '16px',
             marginBottom: '24px',
             backgroundColor: '#ffffff',
-            padding: '20px 24px',
+            padding: '18px 24px',
             borderRadius: '16px',
             boxShadow: '0 1px 3px rgba(0,0,0,0.06)',
           }}
         >
-          <div>
-            <h1 style={{ margin: 0, fontSize: '22px', fontWeight: 800, color: '#0f172a' }}>
-              🚦 لوحة تحكم البلاغات الذكية (Salka)
-            </h1>
-            <p style={{ margin: '6px 0 0', fontSize: '13px', color: '#64748b' }}>
-              إدارة ومتابعة بلاغات الطرق والمرافق المحللة بالذكاء الاصطناعي عبر واتساب
-            </p>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
+            <img
+              src="/logo.png.jpg"
+              alt="Salka App Logo"
+              style={{
+                width: '56px',
+                height: '56px',
+                objectFit: 'contain',
+                borderRadius: '12px',
+                backgroundColor: '#f8fafc',
+                padding: '4px',
+                border: '1px solid #e2e8f0',
+              }}
+            />
+            <div>
+              <h1 style={{ margin: 0, fontSize: '21px', fontWeight: 800, color: '#0f172a' }}>
+                لوحة تحكم البلاغات الذكية (Salka)
+              </h1>
+              <p style={{ margin: '4px 0 0', fontSize: '13px', color: '#64748b' }}>
+                إدارة ومتابعة بلاغات الطرق والمرافق المحللة بالذكاء الاصطناعي عبر واتساب
+              </p>
+            </div>
           </div>
+
           <button
             onClick={fetchHazards}
             style={{
@@ -252,7 +281,7 @@ export default function DashboardPage() {
             }}
           >
             <div style={{ fontSize: '12px', color: '#64748b', fontWeight: 600 }}>
-              خطورة عالية / حرجة
+              خطورة عالية / حرجة (نشطة)
             </div>
             <div
               style={{
@@ -300,7 +329,7 @@ export default function DashboardPage() {
             }}
           >
             <div style={{ fontSize: '12px', color: '#64748b', fontWeight: 600 }}>
-              تم الحل
+              تم الحل (مؤرشف)
             </div>
             <div
               style={{
@@ -367,11 +396,12 @@ export default function DashboardPage() {
                 backgroundColor: '#f8fafc',
               }}
             >
-              <option value="الكل">الكل</option>
-              <option value="جديد">جديد</option>
-              <option value="قيد المعالجة">قيد المعالجة</option>
-              <option value="تم الحل">تم الحل</option>
-              <option value="بلاغ غير صحيح">بلاغ غير صحيح</option>
+              <option value="النشطة">البلاغات النشطة فقط (بدون المحلولة)</option>
+              <option value="جديد">🆕 جديد</option>
+              <option value="قيد المعالجة">🛠️ قيد المعالجة</option>
+              <option value="تم الحل">✅ تم الحل (الأرشيف)</option>
+              <option value="بلاغ غير صحيح">🚫 بلاغ غير صحيح</option>
+              <option value="الكل">عرض الكل</option>
             </select>
           </div>
         </div>
@@ -399,7 +429,7 @@ export default function DashboardPage() {
               color: '#64748b',
             }}
           >
-            لا توجد بلاغات مطابقة للفلتر المحدد.
+            🎉 لا توجد بلاغات نشطة مطابقة للفلتر المحدد حاليًا.
           </div>
         ) : (
           <div
@@ -409,256 +439,267 @@ export default function DashboardPage() {
               gap: '20px',
             }}
           >
-            {filteredHazards.map((hazard) => (
-              <div
-                key={hazard.id}
-                style={{
-                  backgroundColor: '#ffffff',
-                  borderRadius: '16px',
-                  boxShadow: '0 4px 12px rgba(0,0,0,0.06)',
-                  overflow: 'hidden',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  opacity: hazard.status === 'بلاغ غير صحيح' ? 0.72 : 1,
-                  borderTop: `4px solid ${getStatusBorderColor(hazard.status)}`,
-                }}
-              >
-                {/* Image Wrapper */}
+            {filteredHazards.map((hazard) => {
+              const isResolved = hazard.status === 'تم الحل';
+              const isInvalid = hazard.status === 'بلاغ غير صحيح';
+
+              return (
                 <div
+                  key={hazard.id}
                   style={{
-                    position: 'relative',
-                    height: '210px',
-                    backgroundColor: '#e2e8f0',
+                    backgroundColor: isResolved ? '#f0fdf4' : '#ffffff',
+                    borderRadius: '16px',
+                    boxShadow: '0 4px 12px rgba(0,0,0,0.06)',
+                    overflow: 'hidden',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    opacity: isInvalid ? 0.72 : 1,
+                    border: isResolved
+                      ? '1px solid #86efac'
+                      : '1px solid transparent',
+                    borderTop: `4px solid ${getStatusBorderColor(hazard.status)}`,
                   }}
                 >
-                  {hazard.image_url ? (
-                    <img
-                      src={hazard.image_url}
-                      alt={hazard.hazard_category || 'بلاغ'}
-                      style={{
-                        width: '100%',
-                        height: '100%',
-                        objectFit: 'cover',
-                        display: 'block',
-                      }}
-                    />
-                  ) : (
-                    <div
-                      style={{
-                        width: '100%',
-                        height: '100%',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        color: '#94a3b8',
-                        fontSize: '14px',
-                      }}
-                    >
-                      لا توجد صورة
-                    </div>
-                  )}
-
-                  {/* ID Badge */}
-                  <span
+                  {/* Image Wrapper */}
+                  <div
                     style={{
-                      position: 'absolute',
-                      top: '12px',
-                      right: '12px',
-                      backgroundColor: 'rgba(15, 23, 42, 0.85)',
-                      color: '#ffffff',
-                      fontSize: '12px',
-                      fontWeight: 700,
-                      padding: '4px 10px',
-                      borderRadius: '20px',
+                      position: 'relative',
+                      height: '210px',
+                      backgroundColor: '#e2e8f0',
                     }}
                   >
-                    #{hazard.id}
-                  </span>
+                    {hazard.image_url ? (
+                      <img
+                        src={hazard.image_url}
+                        alt={hazard.hazard_category || 'بلاغ'}
+                        style={{
+                          width: '100%',
+                          height: '100%',
+                          objectFit: 'cover',
+                          display: 'block',
+                        }}
+                      />
+                    ) : (
+                      <div
+                        style={{
+                          width: '100%',
+                          height: '100%',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          color: '#94a3b8',
+                          fontSize: '14px',
+                        }}
+                      >
+                        لا توجد صورة
+                      </div>
+                    )}
 
-                  {/* Severity Badge */}
-                  {hazard.severity && (
+                    {/* ID Badge */}
                     <span
                       style={{
                         position: 'absolute',
                         top: '12px',
-                        left: '12px',
+                        right: '12px',
+                        backgroundColor: 'rgba(15, 23, 42, 0.85)',
+                        color: '#ffffff',
                         fontSize: '12px',
                         fontWeight: 700,
-                        padding: '4px 12px',
+                        padding: '4px 10px',
                         borderRadius: '20px',
-                        boxShadow: '0 2px 6px rgba(0,0,0,0.2)',
-                        ...getSeverityStyle(hazard.severity),
                       }}
                     >
-                      {hazard.severity}
+                      #{hazard.id}
                     </span>
-                  )}
-                </div>
 
-                {/* Card Body */}
-                <div
-                  style={{
-                    padding: '18px',
-                    flex: 1,
-                    display: 'flex',
-                    flexDirection: 'column',
-                    justifyContent: 'space-between',
-                  }}
-                >
-                  <div>
-                    <div
-                      style={{
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'center',
-                        gap: '8px',
-                        marginBottom: '8px',
-                      }}
-                    >
-                      <h2
-                        style={{
-                          margin: 0,
-                          fontSize: '17px',
-                          fontWeight: 800,
-                          color: '#0f172a',
-                        }}
-                      >
-                        {hazard.hazard_category || 'بلاغ غير مصنف'}
-                      </h2>
-                      <span style={{ fontSize: '11px', color: '#94a3b8' }}>
-                        {new Date(hazard.created_at).toLocaleDateString('ar-EG', {
-                          month: 'short',
-                          day: 'numeric',
-                          hour: '2-digit',
-                          minute: '2-digit',
-                        })}
-                      </span>
-                    </div>
-
-                    <p
-                      style={{
-                        margin: '0 0 16px',
-                        fontSize: '13.5px',
-                        color: '#475569',
-                        lineHeight: 1.6,
-                      }}
-                    >
-                      {hazard.ai_description || hazard.message}
-                    </p>
-                  </div>
-
-                  {/* Card Footer */}
-                  <div
-                    style={{
-                      paddingTop: '14px',
-                      borderTop: '1px solid #f1f5f9',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      gap: '10px',
-                    }}
-                  >
-                    {hazard.latitude && hazard.longitude ? (
-                      <a
-                        href={`https://www.google.com/maps?q=${hazard.latitude},${hazard.longitude}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        style={{
-                          display: 'block',
-                          textAlign: 'center',
-                          backgroundColor: '#eff6ff',
-                          color: '#1d4ed8',
-                          textDecoration: 'none',
-                          fontSize: '13px',
-                          fontWeight: 700,
-                          padding: '9px 12px',
-                          borderRadius: '10px',
-                        }}
-                      >
-                        📍 فتح الموقع على خرائط Google
-                        {hazard.location_name ? ` (${hazard.location_name})` : ''}
-                      </a>
-                    ) : (
-                      <div
-                        style={{
-                          textAlign: 'center',
-                          backgroundColor: '#fffbeb',
-                          color: '#b45309',
-                          fontSize: '12px',
-                          fontWeight: 600,
-                          padding: '8px',
-                          borderRadius: '8px',
-                        }}
-                      >
-                        ⚠️ بانتظار إرسال الموقع الجغرافي
-                      </div>
-                    )}
-
-                    <div
-                      style={{
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'center',
-                        marginTop: '2px',
-                      }}
-                    >
+                    {/* Severity Badge */}
+                    {hazard.severity && (
                       <span
                         style={{
-                          fontSize: '13px',
+                          position: 'absolute',
+                          top: '12px',
+                          left: '12px',
+                          fontSize: '12px',
                           fontWeight: 700,
-                          color: '#64748b',
+                          padding: '4px 12px',
+                          borderRadius: '20px',
+                          boxShadow: '0 2px 6px rgba(0,0,0,0.2)',
+                          ...getSeverityStyle(hazard.severity),
                         }}
                       >
-                        حالة البلاغ:
+                        {hazard.severity}
                       </span>
-                      <select
-                        disabled={updatingId === hazard.id || deletingId === hazard.id}
-                        value={hazard.status || 'جديد'}
-                        onChange={(e) =>
-                          handleStatusChange(hazard.id, e.target.value)
-                        }
+                    )}
+                  </div>
+
+                  {/* Card Body */}
+                  <div
+                    style={{
+                      padding: '18px',
+                      flex: 1,
+                      display: 'flex',
+                      flexDirection: 'column',
+                      justifyContent: 'space-between',
+                    }}
+                  >
+                    <div>
+                      <div
                         style={{
-                          border: '1px solid #cbd5e1',
-                          borderRadius: '8px',
-                          padding: '6px 12px',
-                          fontSize: '13px',
-                          fontWeight: 700,
-                          backgroundColor: '#f8fafc',
-                          color: '#0f172a',
-                          cursor: 'pointer',
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          gap: '8px',
+                          marginBottom: '8px',
                         }}
                       >
-                        <option value="جديد">🆕 جديد</option>
-                        <option value="قيد المعالجة">🛠️ قيد المعالجة</option>
-                        <option value="تم الحل">✅ تم الحل</option>
-                        <option value="بلاغ غير صحيح">🚫 بلاغ غير صحيح</option>
-                      </select>
+                        <h2
+                          style={{
+                            margin: 0,
+                            fontSize: '17px',
+                            fontWeight: 800,
+                            color: '#0f172a',
+                          }}
+                        >
+                          {hazard.hazard_category || 'بلاغ غير مصنف'}
+                        </h2>
+                        <span style={{ fontSize: '11px', color: '#94a3b8' }}>
+                          {new Date(hazard.created_at).toLocaleDateString('ar-EG', {
+                            month: 'short',
+                            day: 'numeric',
+                            hour: '2-digit',
+                            minute: '2-digit',
+                          })}
+                        </span>
+                      </div>
+
+                      <p
+                        style={{
+                          margin: '0 0 16px',
+                          fontSize: '13.5px',
+                          color: '#475569',
+                          lineHeight: 1.6,
+                        }}
+                      >
+                        {hazard.ai_description || hazard.message}
+                      </p>
                     </div>
 
-                    {/* Delete Button */}
-                    <button
-                      onClick={() => handleDeleteHazard(hazard.id)}
-                      disabled={deletingId === hazard.id}
+                    {/* Card Footer */}
+                    <div
                       style={{
-                        marginTop: '4px',
-                        width: '100%',
-                        backgroundColor: '#fef2f2',
-                        color: '#dc2626',
-                        border: '1px solid #fecaca',
-                        borderRadius: '8px',
-                        padding: '8px 12px',
-                        fontSize: '12.5px',
-                        fontWeight: 700,
-                        cursor: deletingId === hazard.id ? 'not-allowed' : 'pointer',
+                        paddingTop: '14px',
+                        borderTop: '1px solid #f1f5f9',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '10px',
                       }}
                     >
-                      {deletingId === hazard.id
-                        ? 'جاري الحذف...'
-                        : '🗑️ حذف البلاغ نهائيًا'}
-                    </button>
+                      {hazard.latitude && hazard.longitude ? (
+                        <a
+                          href={`https://www.google.com/maps?q=${hazard.latitude},${hazard.longitude}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          style={{
+                            display: 'block',
+                            textAlign: 'center',
+                            backgroundColor: '#eff6ff',
+                            color: '#1d4ed8',
+                            textDecoration: 'none',
+                            fontSize: '13px',
+                            fontWeight: 700,
+                            padding: '9px 12px',
+                            borderRadius: '10px',
+                          }}
+                        >
+                          📍 فتح الموقع على خرائط Google
+                          {hazard.location_name ? ` (${hazard.location_name})` : ''}
+                        </a>
+                      ) : (
+                        <div
+                          style={{
+                            textAlign: 'center',
+                            backgroundColor: '#fffbeb',
+                            color: '#b45309',
+                            fontSize: '12px',
+                            fontWeight: 600,
+                            padding: '8px',
+                            borderRadius: '8px',
+                          }}
+                        >
+                          ⚠️ بانتظار إرسال الموقع الجغرافي
+                        </div>
+                      )}
+
+                      <div
+                        style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          marginTop: '2px',
+                        }}
+                      >
+                        <span
+                          style={{
+                            fontSize: '13px',
+                            fontWeight: 700,
+                            color: '#64748b',
+                          }}
+                        >
+                          حالة البلاغ:
+                        </span>
+                        <select
+                          disabled={
+                            updatingId === hazard.id || deletingId === hazard.id
+                          }
+                          value={hazard.status || 'جديد'}
+                          onChange={(e) =>
+                            handleStatusChange(hazard.id, e.target.value)
+                          }
+                          style={{
+                            border: '1px solid #cbd5e1',
+                            borderRadius: '8px',
+                            padding: '6px 12px',
+                            fontSize: '13px',
+                            fontWeight: 700,
+                            backgroundColor: '#f8fafc',
+                            color: '#0f172a',
+                            cursor: 'pointer',
+                          }}
+                        >
+                          <option value="جديد">🆕 جديد</option>
+                          <option value="قيد المعالجة">🛠️ قيد المعالجة</option>
+                          <option value="تم الحل">✅ تم الحل</option>
+                          <option value="بلاغ غير صحيح">🚫 بلاغ غير صحيح</option>
+                        </select>
+                      </div>
+
+                      {/* Delete Button */}
+                      <button
+                        onClick={() => handleDeleteHazard(hazard.id)}
+                        disabled={deletingId === hazard.id}
+                        style={{
+                          marginTop: '4px',
+                          width: '100%',
+                          backgroundColor: '#fef2f2',
+                          color: '#dc2626',
+                          border: '1px solid #fecaca',
+                          borderRadius: '8px',
+                          padding: '8px 12px',
+                          fontSize: '12.5px',
+                          fontWeight: 700,
+                          cursor:
+                            deletingId === hazard.id ? 'not-allowed' : 'pointer',
+                        }}
+                      >
+                        {deletingId === hazard.id
+                          ? 'جاري الحذف...'
+                          : '🗑️ حذف البلاغ نهائيًا'}
+                      </button>
+                    </div>
                   </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
