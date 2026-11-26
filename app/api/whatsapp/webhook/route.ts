@@ -27,8 +27,6 @@ interface HazardAnalysis {
   description: string;
 }
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
 async function analyzeHazardWithGemini(
   imageBuffer: Buffer,
   mimeType: string
@@ -46,11 +44,16 @@ async function analyzeHazardWithGemini(
   "description": "وصف فني مختصر ودقيق باللغة العربية في جملة واحدة لما يظهر في الصورة"
 }`;
 
-  const model = 'gemini-3.8-flash';
-  const maxAttempts = 3;
+  const modelsToTry = [
+    'gemini-3.8-flash',
+    'gemini-3.7-flash',
+    'gemini-3.6-flash',
+    'gemini-3.5-flash-lite',
+  ];
+
   let lastError = 'Unknown Gemini error';
 
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+  for (const model of modelsToTry) {
     try {
       const res = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`,
@@ -73,6 +76,9 @@ async function analyzeHazardWithGemini(
             ],
             generationConfig: {
               responseMimeType: 'application/json',
+              thinkingConfig: {
+                thinkingBudget: 0,
+              },
             },
           }),
         }
@@ -80,9 +86,8 @@ async function analyzeHazardWithGemini(
 
       if (!res.ok) {
         const errText = await res.text();
-        lastError = `${model} attempt ${attempt} (${res.status}): ${errText.slice(0, 180)}`;
-        if ((res.status === 503 || res.status === 429) && attempt < maxAttempts) {
-          await sleep(1500 * attempt);
+        lastError = `${model} (${res.status}): ${errText.slice(0, 180)}`;
+        if (res.status === 503 || res.status === 429 || res.status === 404) {
           continue;
         }
         return { result: null, error: lastError };
@@ -100,9 +105,6 @@ async function analyzeHazardWithGemini(
       return { result: parsed, error: null };
     } catch (err: any) {
       lastError = `${model} exception: ${err?.message || 'Unknown'}`;
-      if (attempt < maxAttempts) {
-        await sleep(1500 * attempt);
-      }
     }
   }
 
