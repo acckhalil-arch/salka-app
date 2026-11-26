@@ -30,70 +30,80 @@ interface HazardAnalysis {
 async function analyzeHazardWithGemini(
   imageBuffer: Buffer,
   mimeType: string
-): Promise<HazardAnalysis | null> {
+): Promise<{ result: HazardAnalysis | null; error: string | null }> {
   if (!GEMINI_API_KEY) {
-    console.warn('Missing GEMINI_API_KEY for AI analysis');
-    return null;
+    return { result: null, error: 'Missing GEMINI_API_KEY' };
   }
 
-  try {
-    const base64Image = imageBuffer.toString('base64');
-    const prompt = `أنت خبير هندسي وميداني لتحليل بلاغات مخاطر الطرق والمرافق العامة.
-افحص هذه الصورة بدقة وأرجع النتيجة بصيغة JSON فقط باللغة العربية:
-1. category: اختر التصنيف الأنسب من (حفرة في الطريق، كسر ماسورة مياه، عمود إنارة تالف، تراكم مخلفات، أسلاك كهرباء مكشوفة، هبوط أرضي، أخرى).
-2. severity: اختر درجة الخطورة من (منخفضة، متوسطة، عالية، حرجة).
-3. description: وصف فني مختصر ودقيق في جملة واحدة لما يظهر في الصورة.`;
+  const base64Image = imageBuffer.toString('base64');
+  const prompt = `أنت خبير هندسي وميداني لتحليل بلاغات مخاطر الطرق والمرافق العامة.
+افحص هذه الصورة بدقة وأرجع النتيجة بصيغة JSON فقط بهذا الشكل الدقيق دون أي نص إضافي:
+{
+  "category": "اختر التصنيف الأنسب من: حفرة في الطريق، كسر ماسورة مياه، عمود إنارة تالف، تراكم مخلفات، أسلاك كهرباء مكشوفة، هبوط أرضي، أخرى",
+  "severity": "اختر درجة الخطورة من: منخفضة، متوسطة، عالية، حرجة",
+  "description": "وصف فني مختصر ودقيق باللغة العربية في جملة واحدة لما يظهر في الصورة"
+}`;
 
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${GEMINI_API_KEY}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [
-            {
-              parts: [
-                { text: prompt },
-                {
-                  inline_data: {
-                    mime_type: mimeType,
-                    data: base64Image,
+  const modelsToTry = [
+    'gemini-3.8-flash',
+    'gemini-3.0-flash',
+    'gemini-2.5-flash',
+    'gemini-2.0-flash',
+  ];
+
+  let lastError = 'Unknown Gemini error';
+
+  for (const model of modelsToTry) {
+    try {
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [
+              {
+                parts: [
+                  { text: prompt },
+                  {
+                    inline_data: {
+                      mime_type: mimeType,
+                      data: base64Image,
+                    },
                   },
-                },
-              ],
-            },
-          ],
-          generationConfig: {
-            responseMimeType: 'application/json',
-            responseSchema: {
-              type: 'OBJECT',
-              properties: {
-                category: { type: 'STRING' },
-                severity: { type: 'STRING' },
-                description: { type: 'STRING' },
+                ],
               },
-              required: ['category', 'severity', 'description'],
+            ],
+            generationConfig: {
+              responseMimeType: 'application/json',
             },
-          },
-        }),
+          }),
+        }
+      );
+
+      if (!res.ok) {
+        const errText = await res.text();
+        lastError = `${model} (${res.status}): ${errText.slice(0, 200)}`;
+        if (res.status === 404) continue;
+        return { result: null, error: lastError };
       }
-    );
 
-    if (!res.ok) {
-      const errText = await res.text();
-      console.error('Gemini API error:', res.status, errText);
-      return null;
+      const data = await res.json();
+      const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!rawText) {
+        lastError = `${model}: Empty response`;
+        continue;
+      }
+
+      const cleanJson = rawText.replace(/```json|```/g, '').trim();
+      const parsed = JSON.parse(cleanJson) as HazardAnalysis;
+      return { result: parsed, error: null };
+    } catch (err: any) {
+      lastError = `${model} exception: ${err?.message || 'Unknown'}`;
     }
-
-    const data = await res.json();
-    const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!rawText) return null;
-
-    return JSON.parse(rawText) as HazardAnalysis;
-  } catch (err) {
-    console.error('Gemini analysis failed:', err);
-    return null;
   }
+
+  return { result: null, error: lastError };
 }
 
 async function sendWhatsAppReply(
@@ -212,7 +222,10 @@ export async function POST(req: NextRequest) {
 
             imageUrl = publicUrlData.publicUrl;
             mediaStatus = 'uploaded';
-            aiResult = analysisOutcome;
+            aiResult = analysisOutcome.result;
+            if (analysisOutcome.error) {
+              processingError = `AI: ${analysisOutcome.error}`;
+            }
           } catch (err: any) {
             mediaStatus = 'failed';
             processingError = err?.message || 'Unknown media error';
