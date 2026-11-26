@@ -133,4 +133,12 @@ export async function POST(req: NextRequest) {
         media_status: mediaStatus,
         image_url: imageUrl,
         processing_error: processingError,
-      });
+      });   
+    }
+    return NextResponse.json({ status: 'ok' }, { status: 200 });
+  } catch (error: any) {
+    console.error('Webhook POST error:', error);
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+}
+
