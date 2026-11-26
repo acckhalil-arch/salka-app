@@ -27,6 +27,8 @@ interface HazardAnalysis {
   description: string;
 }
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 async function analyzeHazardWithGemini(
   imageBuffer: Buffer,
   mimeType: string
@@ -44,16 +46,11 @@ async function analyzeHazardWithGemini(
   "description": "وصف فني مختصر ودقيق باللغة العربية في جملة واحدة لما يظهر في الصورة"
 }`;
 
-  const modelsToTry = [
-    'gemini-3.8-flash',
-    'gemini-3.0-flash',
-    'gemini-2.5-flash',
-    'gemini-2.0-flash',
-  ];
-
+  const model = 'gemini-3.8-flash';
+  const maxAttempts = 3;
   let lastError = 'Unknown Gemini error';
 
-  for (const model of modelsToTry) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       const res = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`,
@@ -83,9 +80,9 @@ async function analyzeHazardWithGemini(
 
       if (!res.ok) {
         const errText = await res.text();
-        lastError = `${model} (${res.status}): ${errText.slice(0, 200)}`;
-        // الانتقال تلقائيًا للنموذج البديل عند الضغط (503) أو الحد المؤقت (429) أو عدم التوفر (404)
-        if (res.status === 404 || res.status === 503 || res.status === 429) {
+        lastError = `${model} attempt ${attempt} (${res.status}): ${errText.slice(0, 180)}`;
+        if ((res.status === 503 || res.status === 429) && attempt < maxAttempts) {
+          await sleep(1500 * attempt);
           continue;
         }
         return { result: null, error: lastError };
@@ -103,6 +100,9 @@ async function analyzeHazardWithGemini(
       return { result: parsed, error: null };
     } catch (err: any) {
       lastError = `${model} exception: ${err?.message || 'Unknown'}`;
+      if (attempt < maxAttempts) {
+        await sleep(1500 * attempt);
+      }
     }
   }
 
