@@ -17,19 +17,23 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 
 const VERIFY_TOKEN = (process.env.WHATSAPP_VERIFY_TOKEN || '').trim();
 const ACCESS_TOKEN = (process.env.WHATSAPP_ACCESS_TOKEN || '').trim();
-const PHONE_NUMBER_ID = (process.env.WHATSAPP_PHONE_NUMBER_ID || '').trim();
+const FALLBACK_PHONE_ID = (process.env.WHATSAPP_PHONE_NUMBER_ID || '').trim();
 const BUCKET_NAME = 'hazard-images';
 
-// دالة إرسال رد تلقائي عبر WhatsApp Cloud API
-async function sendWhatsAppReply(to: string, text: string) {
-  if (!ACCESS_TOKEN || !PHONE_NUMBER_ID) {
-    console.warn('Missing ACCESS_TOKEN or PHONE_NUMBER_ID for WhatsApp reply');
+async function sendWhatsAppReply(
+  businessPhoneId: string,
+  to: string,
+  text: string
+) {
+  const activePhoneId = businessPhoneId || FALLBACK_PHONE_ID;
+  if (!ACCESS_TOKEN || !activePhoneId) {
+    console.warn('Missing ACCESS_TOKEN or activePhoneId for WhatsApp reply');
     return;
   }
 
   try {
     const res = await fetch(
-      `https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/messages`,
+      `https://graph.facebook.com/v21.0/${activePhoneId}/messages`,
       {
         method: 'POST',
         headers: {
@@ -73,17 +77,15 @@ export async function POST(req: NextRequest) {
     const changes = entry?.changes?.[0];
     const value = changes?.value;
     const messages = value?.messages;
+    const incomingPhoneNumberId = value?.metadata?.phone_number_id || '';
 
     if (!messages || messages.length === 0) {
       return NextResponse.json({ status: 'no_messages' }, { status: 200 });
     }
-
     for (const msg of messages) {
       const whatsappMessageId = msg.id;
       const sender = msg.from;
       const type = msg.type;
-
-      // نافذة زمنية 5 دقائق لدمج الصورة والموقع لنفس المرسل
       const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
 
       if (type === 'image') {
@@ -139,7 +141,6 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        // البحث عن بلاغ حديث لنفس المرسل يحتوي على موقع وينتظر صورة
         const { data: pendingLocationReport } = await supabase
           .from('hazards')
           .select('id, message')
@@ -169,6 +170,7 @@ export async function POST(req: NextRequest) {
             .eq('id', pendingLocationReport.id);
 
           await sendWhatsAppReply(
+            incomingPhoneNumberId,
             sender,
             `✅ شكرًا لك! تم دمج الصورة مع الموقع واكتمال بلاغك بنجاح (رقم البلاغ #${pendingLocationReport.id}).`
           );
@@ -190,6 +192,7 @@ export async function POST(req: NextRequest) {
 
           const reportId = insertedRow?.id || '';
           await sendWhatsAppReply(
+            incomingPhoneNumberId,
             sender,
             `📸 تم استلام صورة البلاغ بنجاح (رقم #${reportId}).\n📍 من فضلك أرسل الموقع الجغرافي (Location) الآن لإتمام البلاغ.`
           );
@@ -202,7 +205,6 @@ export async function POST(req: NextRequest) {
           ? `Location: ${locationName} (${latitude}, ${longitude})`
           : `Location shared (${latitude}, ${longitude})`;
 
-        // البحث عن بلاغ حديث لنفس المرسل يحتوي على صورة وينتظر موقعًا
         const { data: pendingImageReport } = await supabase
           .from('hazards')
           .select('id, message')
@@ -232,6 +234,7 @@ export async function POST(req: NextRequest) {
             .eq('id', pendingImageReport.id);
 
           await sendWhatsAppReply(
+            incomingPhoneNumberId,
             sender,
             `✅ شكرًا لك! تم تسجيل بلاغك بالكامل (رقم البلاغ #${pendingImageReport.id}) مرفقًا بالصورة والموقع الجغرافي.`
           );
@@ -253,6 +256,7 @@ export async function POST(req: NextRequest) {
 
           const reportId = insertedRow?.id || '';
           await sendWhatsAppReply(
+            incomingPhoneNumberId,
             sender,
             `📍 تم استلام الموقع الجغرافي بنجاح (رقم #${reportId}).\n📸 من فضلك أرسل صورة للمشكلة الآن لإتمام البلاغ.`
           );
@@ -268,8 +272,9 @@ export async function POST(req: NextRequest) {
         });
 
         await sendWhatsAppReply(
+          incomingPhoneNumberId,
           sender,
-          `👋 أهلًا بك في خدمة البلاغات (Salka).\nلإرسال بلاغ جديد، أرسل **صورة** المشكلة متبوعة بـ **الموقع الجغرافي (Location)**.`
+          `👋 أهلًا بك في خدمة البلاغات (Salka).\nلإرسال بلاغ جديد، أرسل صورة المشكلة متبوعة بـ الموقع الجغرافي (Location).`
         );
       }
     }
