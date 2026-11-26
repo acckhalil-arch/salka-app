@@ -84,7 +84,10 @@ async function analyzeHazardWithGemini(
       if (!res.ok) {
         const errText = await res.text();
         lastError = `${model} (${res.status}): ${errText.slice(0, 200)}`;
-        if (res.status === 404) continue;
+        // الانتقال تلقائيًا للنموذج البديل عند الضغط (503) أو الحد المؤقت (429) أو عدم التوفر (404)
+        if (res.status === 404 || res.status === 503 || res.status === 429) {
+          continue;
+        }
         return { result: null, error: lastError };
       }
 
