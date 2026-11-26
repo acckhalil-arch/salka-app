@@ -1,635 +1,257 @@
 'use client';
 
-import React, { useState } from 'react';
-import Link from 'next/link';
+import React, { useState, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
+import { createClient } from '@supabase/supabase-js';
 
-// الرقم المربوط بمنصة Meta بالصيغة الدولية بدون علامة +
-const WHATSAPP_NUMBER = '201008229399';
-const WHATSAPP_PREFILL_TEXT = encodeURIComponent(
-  'مرحباً سالكة، أود الإبلاغ عن خطر في الطريق.'
-);
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
+const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
-// دالة ضغط الصورة في المتصفح قبل الرفع لتجنب حد الحجم على الخادم (4.5MB)
-async function compressImage(file: File): Promise<File> {
-  return new Promise((resolve) => {
-    const img = new Image();
-    const url = URL.createObjectURL(file);
-    img.onload = () => {
-      URL.revokeObjectURL(url);
-      const maxDim = 1280;
-      let { width, height } = img;
-      if (width > maxDim || height > maxDim) {
-        if (width > height) {
-          height = Math.round((height * maxDim) / width);
-          width = maxDim;
-        } else {
-          width = Math.round((width * maxDim) / height);
-          height = maxDim;
-        }
+export default function LoginPage() {
+  const router = useRouter();
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [checkingSession, setCheckingSession] = useState(true);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    let isMounted = true;
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (!isMounted) return;
+      if (session) {
+        router.replace('/dashboard');
+      } else {
+        setCheckingSession(false);
       }
-      const canvas = document.createElement('canvas');
-      canvas.width = width;
-      canvas.height = height;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) {
-        resolve(file);
-        return;
-      }
-      ctx.drawImage(img, 0, 0, width, height);
-      canvas.toBlob(
-        (blob) => {
-          if (blob) {
-            resolve(new File([blob], 'report.jpg', { type: 'image/jpeg' }));
-          } else {
-            resolve(file);
-          }
-        },
-        'image/jpeg',
-        0.78
-      );
+    });
+    return () => {
+      isMounted = false;
     };
-    img.onerror = () => resolve(file);
-    img.src = url;
-  });
-}
+  }, [router]);
 
-export default function HomePage() {
-  const [imageFile, setImageFile] = useState<File | null>(null);
-  const [imagePreview, setImagePreview] = useState<string | null>(null);
-  const [latitude, setLatitude] = useState<number | null>(null);
-  const [longitude, setLongitude] = useState<number | null>(null);
-  const [locLoading, setLocLoading] = useState(false);
-  const [locError, setLocError] = useState<string | null>(null);
-  const [notes, setNotes] = useState('');
-  const [phone, setPhone] = useState('');
-  const [submitting, setSubmitting] = useState(false);
-  const [submitError, setSubmitError] = useState<string | null>(null);
-  const [submittedReport, setSubmittedReport] = useState<{
-    id: number;
-    hazard_category: string;
-    severity: string;
-    ai_description: string;
-    whatsappNotified: boolean;
-    hasPhone: boolean;
-  } | null>(null);
-
-  const whatsappUrl = `https://wa.me/${WHATSAPP_NUMBER}?text=${WHATSAPP_PREFILL_TEXT}`;
-  const qrImageUrl = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&margin=10&data=${encodeURIComponent(
-    whatsappUrl
-  )}`;
-
-  const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0] || null;
-    setImageFile(file);
-    setSubmittedReport(null);
-    setSubmitError(null);
-    if (file) {
-      const reader = new FileReader();
-      reader.onload = () => setImagePreview(reader.result as string);
-      reader.readAsDataURL(file);
-    } else {
-      setImagePreview(null);
-    }
-  };
-
-  const handleGetLocation = () => {
-    setLocError(null);
-    if (!navigator.geolocation) {
-      setLocError('المتصفح لا يدعم تحديد الموقع الجغرافي.');
-      return;
-    }
-
-    setLocLoading(true);
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        setLatitude(Number(pos.coords.latitude.toFixed(6)));
-        setLongitude(Number(pos.coords.longitude.toFixed(6)));
-        setLocLoading(false);
-      },
-      (err) => {
-        setLocLoading(false);
-        if (err.code === 1) {
-          setLocError('تم رفض إذن الموقع. يرجى تفعيل GPS والسماح للمتصفح بالوصول للموقع.');
-        } else {
-          setLocError('تعذر تحديد الموقع حاليًا، تأكد من تفعيل GPS وحاول مجددًا.');
-        }
-      },
-      { enableHighAccuracy: true, timeout: 15000 }
-    );
-  };
-
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    setSubmitError(null);
+    setErrorMsg(null);
+    setLoading(true);
 
-    if (!imageFile) {
-      setSubmitError('من فضلك التقط أو اختر صورة للمشكلة أولًا.');
-      return;
-    }
-    if (latitude === null || longitude === null) {
-      setSubmitError('من فضلك اضغط على زر "تحديد موقعي الحالي (GPS)" لإرفاق الموقع.');
-      return;
-    }
-
-    setSubmitting(true);
     try {
-      const compressedFile = await compressImage(imageFile);
-
-      const formData = new FormData();
-      formData.append('image', compressedFile);
-      formData.append('latitude', String(latitude));
-      formData.append('longitude', String(longitude));
-      if (notes.trim()) formData.append('notes', notes.trim());
-      if (phone.trim()) formData.append('phone', phone.trim());
-
-      const res = await fetch('/api/web-report', {
-        method: 'POST',
-        body: formData,
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: email.trim(),
+        password,
       });
 
-      const contentType = res.headers.get('content-type') || '';
-      if (!contentType.includes('application/json')) {
-        setSubmitError(`استجابة غير متوقعة من الخادم (كود ${res.status}).`);
+      if (error) {
+        setErrorMsg('بيانات الدخول غير صحيحة. يرجى التحقق من البريد الإلكتروني وكلمة المرور.');
+        setLoading(false);
         return;
       }
 
-      const data = await res.json();
-      if (!res.ok) {
-        setSubmitError(data.error || 'حدث خطأ أثناء إرسال البلاغ.');
-      } else {
-        setSubmittedReport({
-          ...data.report,
-          whatsappNotified: Boolean(data.whatsappNotified),
-          hasPhone: Boolean(data.hasPhone),
-        });
-        setImageFile(null);
-        setImagePreview(null);
-        setNotes('');
+      if (data.session) {
+        // Verify active status in user_profiles
+        const { data: profile, error: profileError } = await supabase
+          .from('user_profiles')
+          .select('is_active')
+          .eq('id', data.session.user.id)
+          .single();
+
+        if (profileError || !profile?.is_active) {
+          await supabase.auth.signOut();
+          setErrorMsg('هذا الحساب غير مفعل حالياً. يرجى التواصل مع مدير النظام.');
+          setLoading(false);
+          return;
+        }
+
+        router.replace('/dashboard');
       }
-    } catch (err: any) {
-      setSubmitError(`خطأ في الاتصال: ${err?.message || 'حاول مرة أخرى'}`);
-    } finally {
-      setSubmitting(false);
+    } catch {
+      setErrorMsg('حدث خطأ غير متوقع أثناء الاتصال بالخادم.');
+      setLoading(false);
     }
   };
 
+  if (checkingSession) {
+    return (
+      <div dir="rtl" style={styles.container}>
+        <div style={{ color: '#cbd5e1', fontSize: '16px', fontFamily: 'system-ui, -apple-system, sans-serif' }}>
+          جاري التحقق من الجلسة...
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div
-      dir="rtl"
-      style={{
-        minHeight: '100vh',
-        backgroundColor: '#f1f5f9',
-        color: '#0f172a',
-        fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, sans-serif',
-        padding: '20px 16px 48px',
-      }}
-    >
-      <div style={{ maxWidth: '1040px', margin: '0 auto' }}>
-        {/* Top Navbar */}
-        <header
-          style={{
-            backgroundColor: '#ffffff',
-            borderRadius: '18px',
-            padding: '16px 24px',
-            boxShadow: '0 2px 10px rgba(0,0,0,0.05)',
-            display: 'flex',
-            flexWrap: 'wrap',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            gap: '14px',
-            marginBottom: '24px',
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-            <img
-              src="/logo.png.jpg"
-              alt="Salka App"
-              style={{
-                width: '52px',
-                height: '52px',
-                objectFit: 'contain',
-                borderRadius: '12px',
-                border: '1px solid #e2e8f0',
-                padding: '3px',
-              }}
+    <div dir="rtl" style={styles.container}>
+      <div style={styles.card}>
+        <div style={styles.header}>
+          <div style={styles.badge}>منصة سالكة للعمليات البلدية الذكية</div>
+          <h1 style={styles.title}>تسجيل دخول غرفة العمليات</h1>
+          <p style={styles.subtitle}>الوصول مقصور على الكوادر المصرح لها فقط</p>
+        </div>
+
+        {errorMsg && (
+          <div style={styles.errorBox}>
+            <span>⚠️</span>
+            <span>{errorMsg}</span>
+          </div>
+        )}
+
+        <form onSubmit={handleLogin} style={styles.form}>
+          <div style={styles.inputGroup}>
+            <label style={styles.label} htmlFor="email">
+              البريد الإلكتروني الوظيفي
+            </label>
+            <input
+              id="email"
+              type="email"
+              required
+              dir="ltr"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="operator@municipality.gov"
+              style={styles.input}
             />
-            <div>
-              <h1 style={{ margin: 0, fontSize: '20px', fontWeight: 800, color: '#0f172a' }}>
-                منصة سالكة (Salka App)
-              </h1>
-              <p style={{ margin: '2px 0 0', fontSize: '12.5px', color: '#64748b' }}>
-                المنظومة الذكية للإبلاغ الفوري عن مخاطر الطرق والمرافق
-              </p>
-            </div>
           </div>
 
-          <Link
-            href="/dashboard"
+          <div style={styles.inputGroup}>
+            <label style={styles.label} htmlFor="password">
+              كلمة المرور
+            </label>
+            <input
+              id="password"
+              type="password"
+              required
+              dir="ltr"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="••••••••"
+              style={styles.input}
+            />
+          </div>
+
+          <button
+            type="submit"
+            disabled={loading}
             style={{
-              backgroundColor: '#0f172a',
-              color: '#ffffff',
-              textDecoration: 'none',
-              padding: '10px 18px',
-              borderRadius: '10px',
-              fontSize: '13.5px',
-              fontWeight: 700,
+              ...styles.button,
+              opacity: loading ? 0.7 : 1,
+              cursor: loading ? 'not-allowed' : 'pointer',
             }}
           >
-            📊 لوحة تحكم العمليات
-          </Link>
-        </header>
+            {loading ? 'جاري التحقق والدخول...' : 'تسجيل الدخول'}
+          </button>
+        </form>
 
-        {/* Main 2-Column Grid: Web Portal + WhatsApp QR */}
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))',
-            gap: '22px',
-            alignItems: 'start',
-          }}
-        >
-          {/* Card 1: Direct Web Browser Reporting */}
-          <section
-            style={{
-              backgroundColor: '#ffffff',
-              borderRadius: '18px',
-              padding: '24px',
-              boxShadow: '0 4px 16px rgba(0,0,0,0.06)',
-              borderTop: '4px solid #ea580c',
-            }}
-          >
-            <h2 style={{ margin: '0 0 6px', fontSize: '19px', fontWeight: 800 }}>
-              📸 إرسال بلاغ مباشر من المتصفح
-            </h2>
-            <p style={{ margin: '0 0 20px', fontSize: '13px', color: '#64748b' }}>
-              التقط صورة للمشكلة وحدد موقعك الجغرافي ليقوم الذكاء الاصطناعي بتحليلها وتوجيهها فورًا.
-            </p>
-
-            {submittedReport && (
-              <div
-                style={{
-                  backgroundColor: '#f0fdf4',
-                  border: '1px solid #86efac',
-                  borderRadius: '12px',
-                  padding: '16px',
-                  marginBottom: '20px',
-                  color: '#14532d',
-                }}
-              >
-                <div style={{ fontWeight: 800, fontSize: '15px', marginBottom: '6px' }}>
-                  ✅ تم استلام وتحليل بلاغك بنجاح (رقم #{submittedReport.id})
-                </div>
-                <div style={{ fontSize: '13px', lineHeight: 1.7 }}>
-                  <div>
-                    <strong>🔍 التصنيف:</strong> {submittedReport.hazard_category}
-                  </div>
-                  <div>
-                    <strong>⚠️ درجة الخطورة:</strong> {submittedReport.severity}
-                  </div>
-                  <div>
-                    <strong>📝 التقييم الفني:</strong> {submittedReport.ai_description}
-                  </div>
-                </div>
-
-                {submittedReport.hasPhone && (
-                  <div
-                    style={{
-                      marginTop: '12px',
-                      paddingTop: '10px',
-                      borderTop: '1px dashed #86efac',
-                      fontSize: '12.5px',
-                      color: '#15803d',
-                    }}
-                  >
-                    <div>
-                      💬{' '}
-                      {submittedReport.whatsappNotified
-                        ? 'تم إرسال رسالة تأكيد لبلاغك على واتساب، وستصلك إشعارات الصيانة تلقائيًا!'
-                        : 'تم ربط رقمك بالبلاغ لمتابعة حالة الصيانة على واتساب.'}
-                    </div>
-                    <a
-                      href={`https://wa.me/${WHATSAPP_NUMBER}?text=${encodeURIComponent(
-                        `متابعة البلاغ رقم #${submittedReport.id}`
-                      )}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      style={{
-                        display: 'inline-block',
-                        marginTop: '8px',
-                        backgroundColor: '#16a34a',
-                        color: '#ffffff',
-                        textDecoration: 'none',
-                        padding: '7px 14px',
-                        borderRadius: '8px',
-                        fontWeight: 700,
-                        fontSize: '12px',
-                      }}
-                    >
-                      📲 فتح محادثة المتابعة على واتساب
-                    </a>
-                  </div>
-                )}
-              </div>
-            )}
-
-            <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-              {/* Step 1: Image Upload / Camera */}
-              <div>
-                <label
-                  style={{
-                    display: 'block',
-                    fontSize: '13.5px',
-                    fontWeight: 700,
-                    marginBottom: '8px',
-                    color: '#1e293b',
-                  }}
-                >
-                  1. صورة الخطر (التقاط بالكاميرا أو اختيار من الجهاز) *
-                </label>
-                <label
-                  style={{
-                    display: 'flex',
-                    flexDirection: 'column',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    border: '2px dashed #cbd5e1',
-                    borderRadius: '12px',
-                    padding: '18px',
-                    backgroundColor: '#f8fafc',
-                    cursor: 'pointer',
-                    textAlign: 'center',
-                  }}
-                >
-                  <span style={{ fontSize: '26px', marginBottom: '6px' }}>📷</span>
-                  <span style={{ fontSize: '13.5px', fontWeight: 700, color: '#0f172a' }}>
-                    {imageFile ? imageFile.name : 'اضغط هنا لالتقاط صورة أو اختيار ملف'}
-                  </span>
-                  <span style={{ fontSize: '11.5px', color: '#64748b', marginTop: '4px' }}>
-                    JPG, PNG, WEBP (يتم ضغط الصورة تلقائيًا لسرعة الإرسال)
-                  </span>
-                  <input
-                    type="file"
-                    accept="image/*"
-                    capture="environment"
-                    onChange={handleImageChange}
-                    style={{ display: 'none' }}
-                  />
-                </label>
-
-                {imagePreview && (
-                  <img
-                    src={imagePreview}
-                    alt="معاينة الصورة"
-                    style={{
-                      marginTop: '12px',
-                      width: '100%',
-                      maxHeight: '220px',
-                      objectFit: 'cover',
-                      borderRadius: '12px',
-                      border: '1px solid #e2e8f0',
-                    }}
-                  />
-                )}
-              </div>
-
-              {/* Step 2: GPS Location */}
-              <div>
-                <label
-                  style={{
-                    display: 'block',
-                    fontSize: '13.5px',
-                    fontWeight: 700,
-                    marginBottom: '8px',
-                    color: '#1e293b',
-                  }}
-                >
-                  2. الموقع الجغرافي (GPS) *
-                </label>
-                <button
-                  type="button"
-                  onClick={handleGetLocation}
-                  disabled={locLoading}
-                  style={{
-                    width: '100%',
-                    backgroundColor: latitude !== null ? '#ecfdf5' : '#eff6ff',
-                    color: latitude !== null ? '#047857' : '#1d4ed8',
-                    border: `1px solid ${latitude !== null ? '#6ee7b7' : '#bfdbfe'}`,
-                    borderRadius: '10px',
-                    padding: '11px 14px',
-                    fontSize: '13.5px',
-                    fontWeight: 700,
-                    cursor: locLoading ? 'wait' : 'pointer',
-                  }}
-                >
-                  {locLoading
-                    ? '⏳ جاري تحديد إحداثيات الموقع...'
-                    : latitude !== null && longitude !== null
-                    ? `✅ تم تحديد الموقع (${latitude}, ${longitude})`
-                    : '📍 اضغط لتحديد موقعي الحالي تلقائيًا'}
-                </button>
-                {locError && (
-                  <p style={{ margin: '6px 0 0', fontSize: '12px', color: '#dc2626' }}>
-                    {locError}
-                  </p>
-                )}
-              </div>
-
-              {/* Step 3: WhatsApp Phone & Notes */}
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '12px' }}>
-                <div>
-                  <label
-                    style={{
-                      display: 'block',
-                      fontSize: '13px',
-                      fontWeight: 700,
-                      marginBottom: '6px',
-                      color: '#475569',
-                    }}
-                  >
-                    3. رقم الواتساب للمتابعة وتلقي إشعارات الحل 💬
-                  </label>
-                  <input
-                    type="tel"
-                    placeholder="مثال: 010xxxxxxxx"
-                    value={phone}
-                    onChange={(e) => setPhone(e.target.value)}
-                    style={{
-                      width: '100%',
-                      boxSizing: 'border-box',
-                      border: '1px solid #cbd5e1',
-                      borderRadius: '10px',
-                      padding: '10px 12px',
-                      fontSize: '13.5px',
-                    }}
-                  />
-                </div>
-
-                <div>
-                  <label
-                    style={{
-                      display: 'block',
-                      fontSize: '13px',
-                      fontWeight: 700,
-                      marginBottom: '6px',
-                      color: '#475569',
-                    }}
-                  >
-                    ملاحظات إضافية (اختياري)
-                  </label>
-                  <textarea
-                    rows={2}
-                    placeholder="اكتب أي تفاصيل تساعد فريق الصيانة..."
-                    value={notes}
-                    onChange={(e) => setNotes(e.target.value)}
-                    style={{
-                      width: '100%',
-                      boxSizing: 'border-box',
-                      border: '1px solid #cbd5e1',
-                      borderRadius: '10px',
-                      padding: '10px 12px',
-                      fontSize: '13.5px',
-                      resize: 'vertical',
-                    }}
-                  />
-                </div>
-              </div>
-
-              {submitError && (
-                <div
-                  style={{
-                    backgroundColor: '#fef2f2',
-                    color: '#dc2626',
-                    border: '1px solid #fecaca',
-                    borderRadius: '10px',
-                    padding: '10px 12px',
-                    fontSize: '13px',
-                    fontWeight: 600,
-                  }}
-                >
-                  ⚠️ {submitError}
-                </div>
-              )}
-
-              <button
-                type="submit"
-                disabled={submitting}
-                style={{
-                  backgroundColor: submitting ? '#94a3b8' : '#ea580c',
-                  color: '#ffffff',
-                  border: 'none',
-                  borderRadius: '12px',
-                  padding: '13px 18px',
-                  fontSize: '15px',
-                  fontWeight: 800,
-                  cursor: submitting ? 'not-allowed' : 'pointer',
-                  boxShadow: '0 4px 12px rgba(234, 88, 12, 0.25)',
-                }}
-              >
-                {submitting
-                  ? '🤖 جاري ضغط الصورة وتحليل الخطر بالذكاء الاصطناعي...'
-                  : '🚀 إرسال البلاغ الآن'}
-              </button>
-            </form>
-          </section>
-
-          {/* Card 2: WhatsApp QR Code Channel */}
-          <section
-            style={{
-              backgroundColor: '#ffffff',
-              borderRadius: '18px',
-              padding: '24px',
-              boxShadow: '0 4px 16px rgba(0,0,0,0.06)',
-              borderTop: '4px solid #16a34a',
-              textAlign: 'center',
-            }}
-          >
-            <div
-              style={{
-                display: 'inline-block',
-                backgroundColor: '#dcfce7',
-                color: '#15803d',
-                fontSize: '12px',
-                fontWeight: 800,
-                padding: '5px 12px',
-                borderRadius: '20px',
-                marginBottom: '12px',
-              }}
-            >
-              💬 الإبلاغ السريع عبر واتساب
-            </div>
-
-            <h2 style={{ margin: '0 0 8px', fontSize: '19px', fontWeight: 800 }}>
-              امسح الكود وأبلغ في ثوانٍ
-            </h2>
-            <p style={{ margin: '0 0 20px', fontSize: '13px', color: '#64748b', lineHeight: 1.6 }}>
-              وجّه كاميرا هاتفك نحو رمز الـ QR لفتح محادثة <strong>Salka</strong> مباشرة على واتساب وإرسال الصورة والموقع.
-            </p>
-
-            {/* QR Box */}
-            <div
-              style={{
-                display: 'inline-block',
-                padding: '14px',
-                backgroundColor: '#ffffff',
-                borderRadius: '16px',
-                border: '2px solid #e2e8f0',
-                boxShadow: '0 4px 12px rgba(0,0,0,0.04)',
-                marginBottom: '18px',
-              }}
-            >
-              <img
-                src={qrImageUrl}
-                alt="WhatsApp QR Code - Salka App"
-                style={{
-                  width: '210px',
-                  height: '210px',
-                  display: 'block',
-                }}
-              />
-            </div>
-
-            <div style={{ marginBottom: '16px' }}>
-              <a
-                href={whatsappUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                style={{
-                  display: 'block',
-                  backgroundColor: '#16a34a',
-                  color: '#ffffff',
-                  textDecoration: 'none',
-                  padding: '13px 18px',
-                  borderRadius: '12px',
-                  fontSize: '15px',
-                  fontWeight: 800,
-                  boxShadow: '0 4px 12px rgba(22, 163, 74, 0.25)',
-                }}
-              >
-                📲 فتح محادثة واتساب مباشرة
-              </a>
-            </div>
-
-            <div
-              style={{
-                backgroundColor: '#f8fafc',
-                borderRadius: '12px',
-                padding: '14px',
-                textAlign: 'right',
-                fontSize: '12.5px',
-                color: '#475569',
-                lineHeight: 1.7,
-              }}
-            >
-              <div style={{ fontWeight: 800, color: '#0f172a', marginBottom: '4px' }}>
-                كيف يعمل الإبلاغ عبر واتساب؟
-              </div>
-              <div>1️⃣ أرسل صورة المشكلة أو الحفرة في الشارع.</div>
-              <div>2️⃣ شارك الموقع الجغرافي (Location).</div>
-              <div>3️⃣ يصلك رقم البلاغ وتقييم الذكاء الاصطناعي وتحديثات الصيانة تلقائيًا.</div>
-            </div>
-          </section>
+        <div style={styles.footer}>
+          <span>نظام محمي بتشفير الصلاحيات المتعددة (RBAC)</span>
         </div>
       </div>
     </div>
   );
+}
+
+const styles: Record<string, React.CSSProperties> = {
+  container: {
+    minHeight: '100vh',
+    backgroundColor: '#0f172a',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: '20px',
+    fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+  },
+  card: {
+    width: '100%',
+    maxWidth: '420px',
+    backgroundColor: '#1e293b',
+    borderRadius: '16px',
+    border: '1px solid #334155',
+    padding: '32px',
+    boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.4)',
+  },
+  header: {
+    textAlign: 'center',
+    marginBottom: '28px',
+  },
+  badge: {
+    display: 'inline-block',
+    backgroundColor: 'rgba(16, 185, 129, 0.15)',
+    color: '#34d399',
+    border: '1px solid rgba(16, 185, 129, 0.3)',
+    padding: '4px 12px',
+    borderRadius: '9999px',
+    fontSize: '12px',
+    fontWeight: 600,
+    marginBottom: '12px',
+  },
+  title: {
+    color: '#f8fafc',
+    fontSize: '22px',
+    fontWeight: 700,
+    margin: '0 0 8px 0',
+  },
+  subtitle: {
+    color: '#94a3b8',
+    fontSize: '14px',
+    margin: 0,
+  },
+  errorBox: {
+    backgroundColor: 'rgba(239, 68, 68, 0.15)',
+    border: '1px solid rgba(239, 68, 68, 0.4)',
+    color: '#fca5a5',
+    padding: '12px 14px',
+    borderRadius: '10px',
+    fontSize: '13px',
+    marginBottom: '20px',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    lineHeight: 1.5,
+  },
+  form: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '18px',
+  },
+  inputGroup: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '6px',
+  },
+  label: {
+    color: '#e2e8f0',
+    fontSize: '13px',
+    fontWeight: 600,
+  },
+  input: {
+    backgroundColor: '#0f172a',
+    border: '1px solid #334155',
+    borderRadius: '10px',
+    padding: '12px 14px',
+    color: '#f8fafc',
+    fontSize: '15px',
+    outline: 'none',
+    textAlign: 'left',
+  },
+  button: {
+    marginTop: '6px',
+    backgroundColor: '#10b981',
+    color: '#064e3b',
+    fontWeight: 700,
+    fontSize: '15px',
+    padding: '13px',
+    borderRadius: '10px',
+    border: 'none',
+    transition: 'background-color 0.2s',
+  },
+  footer: {
+    marginTop: '24px',
+    paddingTop: '16px',
+    borderTop: '1px solid #334155',
+    textAlign: 'center',
+    color: '#64748b',
+    fontSize: '12px',
+  },
+};
 }
