@@ -15,6 +15,52 @@ const supabaseKey = (
 
 const supabase = createClient(supabaseUrl, supabaseKey);
 
+const ACCESS_TOKEN = (process.env.WHATSAPP_ACCESS_TOKEN || '').trim();
+const PHONE_NUMBER_ID = (process.env.WHATSAPP_PHONE_NUMBER_ID || '').trim();
+
+async function notifyCitizenOnWhatsApp(
+  to: string,
+  reportId: number,
+  category: string | null,
+  newStatus: string
+) {
+  if (!ACCESS_TOKEN || !PHONE_NUMBER_ID || !to) return;
+
+  let statusMessage = '';
+  if (newStatus === 'قيد المعالجة') {
+    statusMessage = `🛠️ تحديث بخصوص بلاغك (رقم #${reportId}${
+      category ? ` - ${category}` : ''
+    }):\nتم توجيه فريق الصيانة المختص وجاري العمل على حل المشكلة حاليًا.`;
+  } else if (newStatus === 'تم الحل') {
+    statusMessage = `✅ بشرى سارة! تم الانتهاء من حل بلاغك (رقم #${reportId}${
+      category ? ` - ${category}` : ''
+    }) بنجاح.\nشكرًا لمساهمتك الإيجابية في تحسين مدينتنا مع خدمة (Salka)!`;
+  } else {
+    return;
+  }
+
+  try {
+    await fetch(
+      `https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/messages`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${ACCESS_TOKEN}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          messaging_product: 'whatsapp',
+          to,
+          type: 'text',
+          text: { body: statusMessage },
+        }),
+      }
+    );
+  } catch (err) {
+    console.error('Failed to send status notification:', err);
+  }
+}
+
 export async function GET() {
   try {
     const { data, error } = await supabase
@@ -43,13 +89,24 @@ export async function PATCH(req: NextRequest) {
       return NextResponse.json({ error: 'Missing id or status' }, { status: 400 });
     }
 
-    const { error } = await supabase
+    const { data: updatedHazard, error } = await supabase
       .from('hazards')
       .update({ status })
-      .eq('id', id);
+      .eq('id', id)
+      .select('id, sender, hazard_category')
+      .single();
 
     if (error) {
       return NextResponse.json({ error: error.message }, { status: 500 });
+    }
+
+    if (updatedHazard?.sender) {
+      await notifyCitizenOnWhatsApp(
+        updatedHazard.sender,
+        updatedHazard.id,
+        updatedHazard.hazard_category,
+        status
+      );
     }
 
     return NextResponse.json({ success: true }, { status: 200 });
