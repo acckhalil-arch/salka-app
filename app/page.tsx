@@ -3,11 +3,55 @@
 import React, { useState } from 'react';
 import Link from 'next/link';
 
-// ضع هنا رقم الواتساب الخاص بالمنصة بصيغة دولية بدون علامة +
-const WHATSAPP_NUMBER = '201283860700';
+// الرقم المربوط بمنصة Meta بالصيغة الدولية بدون علامة +
+const WHATSAPP_NUMBER = '201008229399';
 const WHATSAPP_PREFILL_TEXT = encodeURIComponent(
   'مرحباً سالكة، أود الإبلاغ عن خطر في الطريق.'
 );
+
+// دالة ضغط الصورة في المتصفح قبل الرفع لتجنب حد الحجم على الخادم (4.5MB)
+async function compressImage(file: File): Promise<File> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const maxDim = 1280;
+      let { width, height } = img;
+      if (width > maxDim || height > maxDim) {
+        if (width > height) {
+          height = Math.round((height * maxDim) / width);
+          width = maxDim;
+        } else {
+          width = Math.round((width * maxDim) / height);
+          height = maxDim;
+        }
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        resolve(file);
+        return;
+      }
+      ctx.drawImage(img, 0, 0, width, height);
+      canvas.toBlob(
+        (blob) => {
+          if (blob) {
+            resolve(new File([blob], 'report.jpg', { type: 'image/jpeg' }));
+          } else {
+            resolve(file);
+          }
+        },
+        'image/jpeg',
+        0.78
+      );
+    };
+    img.onerror = () => resolve(file);
+    img.src = url;
+  });
+}
 
 export default function HomePage() {
   const [imageFile, setImageFile] = useState<File | null>(null);
@@ -36,6 +80,7 @@ export default function HomePage() {
     const file = e.target.files?.[0] || null;
     setImageFile(file);
     setSubmittedReport(null);
+    setSubmitError(null);
     if (file) {
       const reader = new FileReader();
       reader.onload = () => setImagePreview(reader.result as string);
@@ -86,8 +131,10 @@ export default function HomePage() {
 
     setSubmitting(true);
     try {
+      const compressedFile = await compressImage(imageFile);
+
       const formData = new FormData();
-      formData.append('image', imageFile);
+      formData.append('image', compressedFile);
       formData.append('latitude', String(latitude));
       formData.append('longitude', String(longitude));
       if (notes.trim()) formData.append('notes', notes.trim());
@@ -98,6 +145,12 @@ export default function HomePage() {
         body: formData,
       });
 
+      const contentType = res.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        setSubmitError(`استجابة غير متوقعة من الخادم (كود ${res.status}).`);
+        return;
+      }
+
       const data = await res.json();
       if (!res.ok) {
         setSubmitError(data.error || 'حدث خطأ أثناء إرسال البلاغ.');
@@ -107,8 +160,8 @@ export default function HomePage() {
         setImagePreview(null);
         setNotes('');
       }
-    } catch {
-      setSubmitError('تعذر الاتصال بالخادم، تأكد من اتصال الإنترنت.');
+    } catch (err: any) {
+      setSubmitError(`خطأ في الاتصال: ${err?.message || 'حاول مرة أخرى'}`);
     } finally {
       setSubmitting(false);
     }
@@ -267,7 +320,7 @@ export default function HomePage() {
                     {imageFile ? imageFile.name : 'اضغط هنا لالتقاط صورة أو اختيار ملف'}
                   </span>
                   <span style={{ fontSize: '11.5px', color: '#64748b', marginTop: '4px' }}>
-                    JPG, PNG, WEBP
+                    JPG, PNG, WEBP (يتم ضغط الصورة تلقائيًا لسرعة الإرسال)
                   </span>
                   <input
                     type="file"
@@ -428,7 +481,7 @@ export default function HomePage() {
                 }}
               >
                 {submitting
-                  ? '🤖 جاري رفع الصورة وتحليل الخطر بالذكاء الاصطناعي...'
+                  ? '🤖 جاري ضغط الصورة وتحليل الخطر بالذكاء الاصطناعي...'
                   : '🚀 إرسال البلاغ الآن'}
               </button>
             </form>
