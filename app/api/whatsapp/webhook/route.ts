@@ -1,109 +1,133 @@
 import { NextResponse } from "next/server";
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
 
-const GRAPH_API_VERSION = "v21.0";
-
-// Helper: Fetch media URL from Meta Graph API v21.0, download binary, and upload to Supabase Storage
-async function processWhatsAppImage(
-  supabase: SupabaseClient,
-  mediaId: string
-): Promise<{
-  imageUrl: string | null;
-  status: "uploaded" | "failed";
-  error: string | null;
-}> {
-  const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
-  if (!accessToken) {
-    return {
-      imageUrl: null,
-      status: "failed",
-      error: "Missing WHATSAPP_ACCESS_TOKEN in Vercel environment variables",
-    };
-  }
+async function processWhatsAppImage(supabase: SupabaseClient, mediaId: string) {
+  const token = process.env.WHATSAPP_ACCESS_TOKEN;
+  if (!token) return { imageUrl: null, status: "failed", error: "Missing WHATSAPP_ACCESS_TOKEN" };
 
   try {
-    // 1. Prevent duplicate processing if this mediaId was already uploaded
     const { data: existing } = await supabase
       .from("hazards")
       .select("image_url")
       .eq("whatsapp_media_id", mediaId)
       .maybeSingle();
 
-    if (existing?.image_url) {
-      return { imageUrl: existing.image_url, status: "uploaded", error: null };
-    }
+    if (existing?.image_url) return { imageUrl: existing.image_url, status: "uploaded", error: null };
 
-    // 2. Request temporary download URL from Meta Graph API v21.0
-    const metaRes = await fetch(
-      `https://graph.facebook.com/${GRAPH_API_VERSION}/${mediaId}`,
-      {
-        headers: { Authorization: `Bearer ${accessToken}` },
-      }
-    );
-
-    if (!metaRes.ok) {
-      const errText = await metaRes.text();
-      throw new Error(`Meta Graph API error (${metaRes.status}): ${errText}`);
-    }
-
-    const metaData = (await metaRes.json()) as {
-      url?: string;
-      mime_type?: string;
-    };
-
-    if (!metaData.url) {
-      throw new Error("Meta Graph API did not return a media download URL");
-    }
-
-    // 3. Download image binary from Meta's media URL
-    const imageRes = await fetch(metaData.url, {
-      headers: { Authorization: `Bearer ${accessToken}` },
+    const metaRes = await fetch(`https://graph.facebook.com/v21.0/${mediaId}`, {
+      headers: { Authorization: `Bearer ${token}` },
     });
+    if (!metaRes.ok) throw new Error(`Meta API ${metaRes.status}: ${await metaRes.text()}`);
 
-    if (!imageRes.ok) {
-      throw new Error(`Image binary download failed (${imageRes.status})`);
-    }
+    const metaData = (await metaRes.json()) as { url?: string; mime_type?: string };
+    if (!metaData.url) throw new Error("No media URL returned by Meta");
 
-    const arrayBuffer = await imageRes.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
+    const imgRes = await fetch(metaData.url, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!imgRes.ok) throw new Error(`Image download ${imgRes.status}`);
+
+    const buffer = Buffer.from(await imgRes.arrayBuffer());
     const mimeType = metaData.mime_type || "image/jpeg";
     const ext = mimeType.split("/")[1]?.split(";")[0] || "jpg";
-    const dateFolder = new Date().toISOString().slice(0, 10);
-    const filePath = `${dateFolder}/${mediaId}.${ext}`;
+    const filePath = `${new Date().toISOString().slice(0, 10)}/${mediaId}.${ext}`;
 
-    // 4. Upload to Supabase Storage bucket 'hazard-images'
     const { error: uploadError } = await supabase.storage
       .from("hazard-images")
-      .upload(filePath, buffer, {
-        contentType: mimeType,
-        upsert: true,
-      });
+      .upload(filePath, buffer, { contentType: mimeType, upsert: true });
 
-    if (uploadError) {
-      throw new Error(`Supabase Storage upload failed: ${uploadError.message}`);
-    }
+    if (uploadError) throw new Error(`Storage error: ${uploadError.message}`);
 
-    // 5. Get public URL for dashboard rendering
-    const { data: publicUrlData } = supabase.storage
-      .from("hazard-images")
-      .getPublicUrl(filePath);
-
-    return {
-      imageUrl: publicUrlData.publicUrl,
-      status: "uploaded",
-      error: null,
-    };
+    const { data: pub } = supabase.storage.from("hazard-images").getPublicUrl(filePath);
+    return { imageUrl: pub.publicUrl, status: "uploaded", error: null };
   } catch (err: any) {
-    const errMsg = err?.message || String(err);
-    console.error(`[Salka Media Error] mediaId=${mediaId}:`, errMsg);
-    return {
-      imageUrl: null,
-      status: "failed",
-      error: errMsg,
-    };
+    return { imageUrl: null, status: "failed", error: err?.message || String(err) };
   }
 }
 
-// Webhook verification endpoint for Meta
 export async function GET(req: Request) {
-  const {
+  const { searchParams } = new URL(req.url);
+  const mode = searchParams.get("hub.mode");
+  const token = searchParams.get("hub.verify_token");
+  const challenge = searchParams.get("hub.challenge");
+  const verifyToken = process.env.WHATSAPP_VERIFY_TOKEN || "Salka_verify_2026";
+
+  if (mode === "subscribe" && (token === verifyToken || token === "Salka_verify_2026")) {
+    return new Response(challenge, { status: 200 });
+  }
+  return new Response("Forbidden", { status: 403 });
+}
+
+export async function POST(req: Request) {
+  try {
+    const body = await req.json();
+    const supabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || "https://rsqdqvftbslcxuclciqh.supabase.co";
+    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+if (!supabaseKey) return NextResponse.json({ received: true, db: "missing_key" }, { status: 200 });
+
+    const supabase = createClient(supabaseUrl, supabaseKey);
+    const message = body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+
+    if (message) {
+      const from = message.from || "unknown_sender";
+      const whatsappMessageId = message.id || null;
+      const msgType = message.type || "unknown";
+
+      if (whatsappMessageId) {
+        const { data: dup } = await supabase
+          .from("hazards")
+          .select("id")
+          .eq("whatsapp_message_id", whatsappMessageId)
+          .maybeSingle();
+        if (dup) return NextResponse.json({ status: "duplicate_ignored" }, { status: 200 });
+      }
+
+      let text = message.text?.body || msgType;
+      let latitude: number | null = null;
+      let longitude: number | null = null;
+      let locationName: string | null = null;
+      let imageUrl: string | null = null;
+      let whatsappMediaId: string | null = null;
+      let mediaStatus = "none";
+      let processingError: string | null = null;
+
+      if (msgType === "location" && message.location) {
+        latitude = message.location.latitude ?? null;
+        longitude = message.location.longitude ?? null;
+        locationName = [message.location.name, message.location.address].filter(Boolean).join(" - ") || null;
+        text = locationName ? `Location: ${locationName} (${latitude}, ${longitude})` : `Location shared (${latitude}, ${longitude})`;
+      }
+
+      if (msgType === "image" && message.image?.id) {
+        whatsappMediaId = message.image.id;
+        text = message.image.caption || "Image hazard report";
+        const res = await processWhatsAppImage(supabase, whatsappMediaId!);
+        imageUrl = res.imageUrl;
+        mediaStatus = res.status;
+        processingError = res.error;
+      }
+
+      const { error: dbError } = await supabase.from("hazards").insert([{
+        sender: from,
+        message: text,
+        raw_payload: body,
+        created_at: new Date().toISOString(),
+        whatsapp_message_id: whatsappMessageId,
+        latitude,
+        longitude,
+        location_name: locationName,
+        image_url: imageUrl,
+        whatsapp_media_id: whatsappMediaId,
+        media_status: mediaStatus,
+        processing_error: processingError,
+      }]);
+
+      if (dbError) console.error("Supabase insert error:", dbError.message);
+    }
+
+    return NextResponse.json({ status: "success" }, { status: 200 });
+  } catch (error: any) {
+    console.error("Unhandled Webhook POST Error:", error?.message || error);
+    return NextResponse.json({ error: error?.message || "Internal error" }, { status: 200 });
+  }
+}
