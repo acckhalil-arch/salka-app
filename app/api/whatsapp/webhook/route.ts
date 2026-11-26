@@ -45,9 +45,10 @@ async function analyzeHazardWithGemini(
 }`;
 
   const modelsToTry = [
+    'gemini-2.5-flash',
+    'gemini-2.5-flash-lite',
     'gemini-3.8-flash',
     'gemini-3.7-flash',
-    'gemini-3.6-flash',
     'gemini-3.5-flash-lite',
   ];
 
@@ -76,9 +77,6 @@ async function analyzeHazardWithGemini(
             ],
             generationConfig: {
               responseMimeType: 'application/json',
-              thinkingConfig: {
-                thinkingBudget: 0,
-              },
             },
           }),
         }
@@ -176,7 +174,6 @@ export async function POST(req: NextRequest) {
       const type = msg.type;
       const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
 
-      // 1. منع معالجة نفس الرسالة مرتين إذا أعاد سيرفر Meta إرسالها
       const { data: existingMsg } = await supabase
         .from('hazards')
         .select('id')
@@ -191,7 +188,6 @@ export async function POST(req: NextRequest) {
         const whatsappMediaId = msg.image?.id || null;
         const captionText = msg.image?.caption || 'Image hazard report';
 
-        // البحث أولًا عن بلاغ موقع ينتظر صورة لنفس المرسل
         const { data: pendingLocationReport } = await supabase
           .from('hazards')
           .select('id, message')
@@ -206,7 +202,6 @@ export async function POST(req: NextRequest) {
         let targetReportId: number | null = pendingLocationReport?.id || null;
         const isMergingWithLocation = Boolean(pendingLocationReport);
 
-        // 2. حجز السجل فورًا قبل التحميل والتحليل لمنع تضارب التوقيت مع رسالة الموقع
         if (isMergingWithLocation && targetReportId) {
           await supabase
             .from('hazards')
@@ -293,7 +288,6 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        // 3. تحديث السجل المحجوز بنتائج الصورة والذكاء الاصطناعي وقراءة أحدث حالة للموقع
         const { data: currentRow } = await supabase
           .from('hazards')
           .select('id, message, latitude')
@@ -347,7 +341,6 @@ export async function POST(req: NextRequest) {
           ? `Location: ${locationName} (${latitude}, ${longitude})`
           : `Location shared (${latitude}, ${longitude})`;
 
-        // البحث عن أي بلاغ صورة ينتظر موقعًا (سواء اكتمل رفعه أو ما زال قيد المعالجة)
         const { data: pendingImageReport } = await supabase
           .from('hazards')
           .select('id, message, media_status')
@@ -376,7 +369,6 @@ export async function POST(req: NextRequest) {
             })
             .eq('id', pendingImageReport.id);
 
-          // إذا كانت الصورة ما زالت قيد التحليل، سيتولى فرع الصورة إرسال رسالة الاكتمال النهائية
           if (pendingImageReport.media_status === 'uploaded') {
             await sendWhatsAppReply(
               incomingPhoneNumberId,
