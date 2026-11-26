@@ -45,13 +45,14 @@ export async function POST(req: NextRequest) {
 
     for (const msg of messages) {
       const whatsappMessageId = msg.id;
-      const senderPhone = msg.from;
+      const sender = msg.from;
       const type = msg.type;
 
       let messageText = '';
       let latitude: number | null = null;
       let longitude: number | null = null;
       let locationName: string | null = null;
+      let whatsappMediaId: string | null = null;
       let mediaStatus = 'none';
       let imageUrl: string | null = null;
       let processingError: string | null = null;
@@ -66,16 +67,16 @@ export async function POST(req: NextRequest) {
           ? `Location: ${locationName} (${latitude}, ${longitude})`
           : `Location shared (${latitude}, ${longitude})`;
       } else if (type === 'image') {
-        const mediaId = msg.image?.id;
+        whatsappMediaId = msg.image?.id || null;
         messageText = msg.image?.caption || 'Image hazard report';
 
         if (!ACCESS_TOKEN) {
           mediaStatus = 'failed';
           processingError = 'Missing WHATSAPP_ACCESS_TOKEN environment variable';
-        } else if (mediaId) {
+        } else if (whatsappMediaId) {
           try {
             // Step 1: Retrieve temporary media download URL from Meta Graph API
-            const metaRes = await fetch(`https://graph.facebook.com/v21.0/${mediaId}`, {
+            const metaRes = await fetch(`https://graph.facebook.com/v21.0/${whatsappMediaId}`, {
               headers: {
                 Authorization: `Bearer ${ACCESS_TOKEN}`,
               },
@@ -136,11 +137,13 @@ export async function POST(req: NextRequest) {
 
       const { error: insertError } = await supabase.from('hazards').insert({
         whatsapp_message_id: whatsappMessageId,
-        sender_phone: senderPhone,
+        sender,
         message: messageText,
+        raw_payload: msg,
         latitude,
         longitude,
         location_name: locationName,
+        whatsapp_media_id: whatsappMediaId,
         media_status: mediaStatus,
         image_url: imageUrl,
         processing_error: processingError,
