@@ -1,72 +1,109 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import { createClient, SupabaseClient } from "@supabase/supabase-js";
+
+const GRAPH_API_VERSION = "v21.0";
+
+// Helper: Fetch media URL from Meta Graph API v21.0, download binary, and upload to Supabase Storage
+async function processWhatsAppImage(
+  supabase: SupabaseClient,
+  mediaId: string
+): Promise<{
+  imageUrl: string | null;
+  status: "uploaded" | "failed";
+  error: string | null;
+}> {
+  const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
+  if (!accessToken) {
+    return {
+      imageUrl: null,
+      status: "failed",
+      error: "Missing WHATSAPP_ACCESS_TOKEN in Vercel environment variables",
+    };
+  }
+
+  try {
+    // 1. Prevent duplicate processing if this mediaId was already uploaded
+    const { data: existing } = await supabase
+      .from("hazards")
+      .select("image_url")
+      .eq("whatsapp_media_id", mediaId)
+      .maybeSingle();
+
+    if (existing?.image_url) {
+      return { imageUrl: existing.image_url, status: "uploaded", error: null };
+    }
+
+    // 2. Request temporary download URL from Meta Graph API v21.0
+    const metaRes = await fetch(
+      `https://graph.facebook.com/${GRAPH_API_VERSION}/${mediaId}`,
+      {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      }
+    );
+
+    if (!metaRes.ok) {
+      const errText = await metaRes.text();
+      throw new Error(`Meta Graph API error (${metaRes.status}): ${errText}`);
+    }
+
+    const metaData = (await metaRes.json()) as {
+      url?: string;
+      mime_type?: string;
+    };
+
+    if (!metaData.url) {
+      throw new Error("Meta Graph API did not return a media download URL");
+    }
+
+    // 3. Download image binary from Meta's media URL
+    const imageRes = await fetch(metaData.url, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+
+    if (!imageRes.ok) {
+      throw new Error(`Image binary download failed (${imageRes.status})`);
+    }
+
+    const arrayBuffer = await imageRes.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    const mimeType = metaData.mime_type || "image/jpeg";
+    const ext = mimeType.split("/")[1]?.split(";")[0] || "jpg";
+    const dateFolder = new Date().toISOString().slice(0, 10);
+    const filePath = `${dateFolder}/${mediaId}.${ext}`;
+
+    // 4. Upload to Supabase Storage bucket 'hazard-images'
+    const { error: uploadError } = await supabase.storage
+      .from("hazard-images")
+      .upload(filePath, buffer, {
+        contentType: mimeType,
+        upsert: true,
+      });
+
+    if (uploadError) {
+      throw new Error(`Supabase Storage upload failed: ${uploadError.message}`);
+    }
+
+    // 5. Get public URL for dashboard rendering
+    const { data: publicUrlData } = supabase.storage
+      .from("hazard-images")
+      .getPublicUrl(filePath);
+
+    return {
+      imageUrl: publicUrlData.publicUrl,
+      status: "uploaded",
+      error: null,
+    };
+  } catch (err: any) {
+    const errMsg = err?.message || String(err);
+    console.error(`[Salka Media Error] mediaId=${mediaId}:`, errMsg);
+    return {
+      imageUrl: null,
+      status: "failed",
+      error: errMsg,
+    };
+  }
+}
 
 // Webhook verification endpoint for Meta
 export async function GET(req: Request) {
-  const { searchParams } = new URL(req.url);
-  const mode = searchParams.get("hub.mode");
-  const token = searchParams.get("hub.verify_token");
-  const challenge = searchParams.get("hub.challenge");
-
-  const verifyToken = process.env.WHATSAPP_VERIFY_TOKEN || "Salka_verify_2026";
-
-  if (mode === "subscribe" && (token === verifyToken || token === "Salka_verify_2026")) {
-    return new Response(challenge, { status: 200 });
-  }
-  return new Response("Forbidden", { status: 403 });
-}
-
-// Webhook event receiver
-export async function POST(req: Request) {
-  try {
-    const body = await req.json();
-
-    // Direct fallback for your Supabase URL
-    const supabaseUrl =
-      process.env.SUPABASE_URL ||
-      process.env.NEXT_PUBLIC_SUPABASE_URL ||
-      "https://rsqdqvftbslcxuclciqh.supabase.co";
-  
-    // Service key fallback
-    const supabaseKey =
-      process.env.SUPABASE_SERVICE_ROLE_KEY ||
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-
-    if (!supabaseKey) {
-      console.error("Missing SUPABASE_SERVICE_ROLE_KEY or ANON KEY in runtime environment.");
-      return NextResponse.json({ received: true, db: "missing_key" }, { status: 200 });
-    }
-
-    const supabase = createClient(supabaseUrl, supabaseKey);
-
-    const entry = body?.entry?.[0];
-    const changes = entry?.changes?.[0];
-    const value = changes?.value;
-    const message = value?.messages?.[0];
-
-    if (message) {
-      const from = message.from || "unknown_sender";
-      const text = message.text?.body || message.type || "unknown_message";
-
-      const { error: dbError } = await supabase.from("hazards").insert([
-        {
-          sender: from,
-          message: text,
-          raw_payload: body,
-          created_at: new Date().toISOString(),
-        },
-      ]);
-
-      if (dbError) {
-        console.error("Supabase insert error:", dbError.message);
-      } else {
-        console.log("Successfully inserted hazard record into Supabase");
-      }
-    }
-
-    return NextResponse.json({ status: "success" }, { status: 200 });
-  } catch (error: any) {
-    console.error("Unhandled Webhook POST Error:", error?.message || error);
-    return NextResponse.json({ error: error?.message || "Internal error" }, { status: 200 });
-  }
-}
+  const {
