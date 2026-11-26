@@ -49,7 +49,6 @@ export default function LoginPage() {
       }
 
       if (data.session) {
-        // Verify active status in user_profiles
         const { data: profile, error: profileError } = await supabase
           .from('user_profiles')
           .select('is_active')
@@ -254,4 +253,3 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '12px',
   },
 };
-}
