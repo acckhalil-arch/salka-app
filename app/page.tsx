@@ -69,6 +69,8 @@ export default function HomePage() {
     hazard_category: string;
     severity: string;
     ai_description: string;
+    whatsappNotified: boolean;
+    hasPhone: boolean;
   } | null>(null);
 
   const whatsappUrl = `https://wa.me/${WHATSAPP_NUMBER}?text=${WHATSAPP_PREFILL_TEXT}`;
@@ -155,7 +157,11 @@ export default function HomePage() {
       if (!res.ok) {
         setSubmitError(data.error || 'حدث خطأ أثناء إرسال البلاغ.');
       } else {
-        setSubmittedReport(data.report);
+        setSubmittedReport({
+          ...data.report,
+          whatsappNotified: Boolean(data.whatsappNotified),
+          hasPhone: Boolean(data.hasPhone),
+        });
         setImageFile(null);
         setImagePreview(null);
         setNotes('');
@@ -273,7 +279,7 @@ export default function HomePage() {
                 <div style={{ fontWeight: 800, fontSize: '15px', marginBottom: '6px' }}>
                   ✅ تم استلام وتحليل بلاغك بنجاح (رقم #{submittedReport.id})
                 </div>
-                <div style={{ fontSize: '13px', lineHeight: 1.6 }}>
+                <div style={{ fontSize: '13px', lineHeight: 1.7 }}>
                   <div>
                     <strong>🔍 التصنيف:</strong> {submittedReport.hazard_category}
                   </div>
@@ -284,6 +290,45 @@ export default function HomePage() {
                     <strong>📝 التقييم الفني:</strong> {submittedReport.ai_description}
                   </div>
                 </div>
+
+                {submittedReport.hasPhone && (
+                  <div
+                    style={{
+                      marginTop: '12px',
+                      paddingTop: '10px',
+                      borderTop: '1px dashed #86efac',
+                      fontSize: '12.5px',
+                      color: '#15803d',
+                    }}
+                  >
+                    <div>
+                      💬{' '}
+                      {submittedReport.whatsappNotified
+                        ? 'تم إرسال رسالة تأكيد لبلاغك على واتساب، وستصلك إشعارات الصيانة تلقائيًا!'
+                        : 'تم ربط رقمك بالبلاغ لمتابعة حالة الصيانة على واتساب.'}
+                    </div>
+                    <a
+                      href={`https://wa.me/${WHATSAPP_NUMBER}?text=${encodeURIComponent(
+                        `متابعة البلاغ رقم #${submittedReport.id}`
+                      )}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{
+                        display: 'inline-block',
+                        marginTop: '8px',
+                        backgroundColor: '#16a34a',
+                        color: '#ffffff',
+                        textDecoration: 'none',
+                        padding: '7px 14px',
+                        borderRadius: '8px',
+                        fontWeight: 700,
+                        fontSize: '12px',
+                      }}
+                    >
+                      📲 فتح محادثة المتابعة على واتساب
+                    </a>
+                  </div>
+                )}
               </div>
             )}
 
@@ -389,7 +434,7 @@ export default function HomePage() {
                 )}
               </div>
 
-              {/* Step 3: Optional Phone & Notes */}
+              {/* Step 3: WhatsApp Phone & Notes */}
               <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '12px' }}>
                 <div>
                   <label
@@ -401,7 +446,7 @@ export default function HomePage() {
                       color: '#475569',
                     }}
                   >
-                    رقم الهاتف للمتابعة (اختياري)
+                    3. رقم الواتساب للمتابعة وتلقي إشعارات الحل 💬
                   </label>
                   <input
                     type="tel"
