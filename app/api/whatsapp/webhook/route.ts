@@ -27,7 +27,6 @@ interface HazardAnalysis {
   description: string;
 }
 
-// التحقق من Webhook عند الربط مع Meta
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const mode = searchParams.get('hub.mode');
@@ -40,7 +39,6 @@ export async function GET(req: NextRequest) {
   return new NextResponse('Forbidden', { status: 403 });
 }
 
-// إرسال رد على واتساب (يدعم أرقام الهواتف العادية ومعرّفات iOS BSUID)
 async function sendWhatsAppReply(to: string, text: string) {
   if (!ACCESS_TOKEN || !PHONE_NUMBER_ID || !to) return;
 
@@ -73,7 +71,6 @@ async function sendWhatsAppReply(to: string, text: string) {
   }
 }
 
-// تحميل الصورة من خوادم Meta
 async function downloadWhatsAppMedia(
   mediaId: string
 ): Promise<{ buffer: Buffer; mimeType: string } | null> {
@@ -106,7 +103,6 @@ async function downloadWhatsAppMedia(
   }
 }
 
-// تحليل الصورة عبر Gemini
 async function analyzeHazardWithGemini(
   imageBuffer: Buffer,
   mimeType: string
@@ -126,9 +122,9 @@ async function analyzeHazardWithGemini(
 
   const modelsToTry = [
     'gemini-2.5-flash',
+    'gemini-2.0-flash',
     'gemini-2.5-flash-lite',
-    'gemini-3.8-flash',
-    'gemini-3.7-flash',
+    'gemini-1.5-flash',
   ];
 
   let lastError = 'Unknown Gemini error';
@@ -182,7 +178,6 @@ async function analyzeHazardWithGemini(
   return { result: null, error: lastError };
 }
 
-// استقبال الرسائل الواردة من واتساب
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
@@ -206,11 +201,26 @@ export async function POST(req: NextRequest) {
     const msgId = message.id || `wa_${Date.now()}`;
     const msgType = message.type;
 
-    // 1. حالة استلام صورة
+    // 1. حالة استلام صورة: نحجز السجل في قاعدة البيانات فورًا لمنع السباق مع رسالة الموقع
     if (msgType === 'image' && message.image?.id) {
       const caption = message.image.caption || '';
-      const media = await downloadWhatsAppMedia(message.image.id);
 
+      const { data: placeholder } = await supabase
+        .from('hazards')
+        .insert({
+          whatsapp_message_id: msgId,
+          sender,
+          message: caption || 'صورة بلاغ عبر واتساب',
+          raw_payload: body,
+          media_status: 'processing',
+          status: 'جديد',
+        })
+        .select('id')
+        .single();
+
+      const reportId = placeholder?.id;
+
+      const media = await downloadWhatsAppMedia(message.image.id);
       if (!media) {
         await sendWhatsAppReply(
           sender,
@@ -241,33 +251,34 @@ export async function POST(req: NextRequest) {
       const description =
         aiRes.result?.description || caption || 'بلاغ مصور عبر واتساب';
 
-      const { data: inserted } = await supabase
-        .from('hazards')
-        .insert({
-          whatsapp_message_id: msgId,
-          sender,
-          message: caption || 'صورة بلاغ عبر واتساب',
-          raw_payload: body,
-          media_status: uploadRes.error ? 'failed' : 'uploaded',
-          image_url: pubUrl?.publicUrl || null,
-          hazard_category: category,
-          severity,
-          ai_description: description,
-          processing_error: aiRes.error,
-          status: 'جديد',
-        })
-        .select('id')
-        .single();
+      if (reportId) {
+        const { data: updatedRow } = await supabase
+          .from('hazards')
+          .update({
+            media_status: uploadRes.error ? 'failed' : 'uploaded',
+            image_url: pubUrl?.publicUrl || null,
+            hazard_category: category,
+            severity,
+            ai_description: description,
+            processing_error: aiRes.error,
+          })
+          .eq('id', reportId)
+          .select('id, latitude')
+          .single();
 
-      const reportNum = inserted?.id ? `#${inserted.id}` : '';
-      await sendWhatsAppReply(
-        sender,
-        `✅ تم استلام الصورة وتحليلها بنجاح ${reportNum}\n` +
-          `🔍 *التصنيف:* ${category}\n` +
-          `⚠️ *درجة الخطورة:* ${severity}\n` +
-          `📝 *التقييم:* ${description}\n\n` +
-          `📍 *الخطوة الأخيرة:* من فضلك أرسل الآن **الموقع الجغرافي (Location)** ليتم توجيه فريق الصيانة فورًا.`
-      );
+        const hasLocationAlready = updatedRow?.latitude !== null && updatedRow?.latitude !== undefined;
+
+        await sendWhatsAppReply(
+          sender,
+          `✅ تم استلام الصورة وتحليلها بنجاح #${reportId}\n` +
+            `🔍 *التصنيف:* ${category}\n` +
+            `⚠️ *درجة الخطورة:* ${severity}\n` +
+            `📝 *التقييم:* ${description}\n\n` +
+            (hasLocationAlready
+              ? `📍 *تم ربط موقعك الجغرافي بالبلاغ تلقائيًا!* سنوافيك بالتحديثات أولًا بأول.`
+              : `📍 *الخطوة الأخيرة:* من فضلك أرسل الآن **الموقع الجغرافي (Location)** ليتم توجيه فريق الصيانة فورًا.`)
+        );
+      }
 
       return NextResponse.json({ status: 'image_processed' }, { status: 200 });
     }
@@ -277,7 +288,6 @@ export async function POST(req: NextRequest) {
       const { latitude, longitude, name, address } = message.location;
       const locationName = name || address || null;
 
-      // البحث عن أحدث بلاغ لنفس المرسل ينتظر إحداثيات الموقع
       const { data: recentHazard } = await supabase
         .from('hazards')
         .select('id')
@@ -312,7 +322,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ status: 'location_processed' }, { status: 200 });
     }
 
-    // 3. حالة استلام رسالة نصية ترحيبية أو استفسار
+    // 3. حالة استلام رسالة نصية
     if (msgType === 'text') {
       await sendWhatsAppReply(
         sender,
