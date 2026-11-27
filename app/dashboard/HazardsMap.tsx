@@ -111,21 +111,20 @@ export default function HazardsMap({ hazards, onSelectHazard }: HazardsMapProps)
     };
   }, []);
 
-  // Initialize base map
+  // Initialize base map with OpenStreetMap (no API key required)
   useEffect(() => {
     if (!scriptsLoaded || !mapContainerRef.current || mapInstanceRef.current) return;
     const L = window.L;
     if (!L) return;
 
-    // Default center: Alexandria, Egypt (auto-fits to markers when available)
     const map = L.map(mapContainerRef.current, {
       center: [31.2001, 29.9187],
       zoom: 12,
       zoomControl: true,
     });
 
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
-      attribution: '&copy; OpenStreetMap &copy; CARTO',
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap contributors',
       maxZoom: 19,
     }).addTo(map);
 
