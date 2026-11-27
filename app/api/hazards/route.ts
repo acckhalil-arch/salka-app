@@ -1,164 +1,158 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 
-const supabaseUrl = (
-  process.env.NEXT_PUBLIC_SUPABASE_URL ||
-  process.env.SUPABASE_URL ||
-  ''
-).trim();
+export const dynamic = 'force-dynamic';
 
-const supabaseKey = (
-  process.env.SUPABASE_SERVICE_ROLE_KEY ||
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
-  ''
-).trim();
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || '';
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
+const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || supabaseAnonKey;
 
-const supabase = createClient(supabaseUrl, supabaseKey);
+const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey);
 
-const ACCESS_TOKEN = (process.env.WHATSAPP_ACCESS_TOKEN || '').trim();
-const PHONE_NUMBER_ID = (process.env.WHATSAPP_PHONE_NUMBER_ID || '').trim();
-
-async function notifyCitizenOnWhatsApp(
-  to: string,
-  reportId: number,
-  category: string | null,
-  newStatus: string
-) {
-  if (!ACCESS_TOKEN || !PHONE_NUMBER_ID || !to) return;
-
-  let statusMessage = '';
-  if (newStatus === 'قيد المعالجة') {
-    statusMessage = `🛠️ تحديث بخصوص بلاغك (رقم #${reportId}${
-      category ? ` - ${category}` : ''
-    }):\nتم توجيه فريق الصيانة المختص وجاري العمل على حل المشكلة حاليًا.`;
-  } else if (newStatus === 'تم الحل') {
-    statusMessage = `✅ بشرى سارة! تم الانتهاء من حل بلاغك (رقم #${reportId}${
-      category ? ` - ${category}` : ''
-    }) بنجاح.\nشكرًا لمساهمتك الإيجابية في تحسين مدينتنا مع خدمة (Salka)!`;
-  } else {
-    return;
+async function getAuthenticatedUser(req: NextRequest) {
+  const authHeader = req.headers.get('authorization');
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return null;
   }
 
-  try {
-    const isBsuid = !/^\d+$/.test(to);
-    const payload: Record<string, any> = {
-      messaging_product: 'whatsapp',
-      type: 'text',
-      text: { body: statusMessage },
-    };
+  const token = authHeader.replace('Bearer ', '').trim();
+  const { data: { user }, error } = await supabaseAdmin.auth.getUser(token);
 
-    if (isBsuid) {
-      payload.recipient_type = 'individual';
-      payload.to = to;
-    } else {
-      payload.to = to;
-    }
-
-    await fetch(
-      `https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/messages`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${ACCESS_TOKEN}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(payload),
-      }
-    );
-  } catch (err) {
-    console.error('Failed to send status notification:', err);
+  if (error || !user) {
+    return null;
   }
+
+  // Create a client scoped to the user's JWT so RLS "Users can view own profile" works reliably
+  const supabaseUser = createClient(supabaseUrl, supabaseAnonKey, {
+    global: {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    },
+  });
+
+  const { data: profile } = await supabaseUser
+    .from('user_profiles')
+    .select('*')
+    .eq('id', user.id)
+    .maybeSingle();
+
+  if (profile && profile.is_active === false) {
+    return { user, profile: null, blocked: true };
+  }
+
+  return {
+    user,
+    blocked: false,
+    profile: profile || {
+      id: user.id,
+      email: user.email || '',
+      full_name: user.email?.split('@')[0] || 'مستخدم النظام',
+      role: 'viewer',
+      department: 'العمليات',
+      is_active: true,
+    },
+  };
 }
 
-export async function GET() {
-  try {
-    const { data, error } = await supabase
-      .from('hazards')
-      .select(
-        'id, created_at, sender, message, image_url, latitude, longitude, location_name, hazard_category, severity, ai_description, status, media_status'
-      )
-      .not('image_url', 'is', null)
-      .order('id', { ascending: false })
-      .limit(100);
-
-    if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 });
-    }
-
-    return NextResponse.json({ hazards: data || [] }, { status: 200 });
-  } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+export async function GET(req: NextRequest) {
+  const auth = await getAuthenticatedUser(req);
+  if (!auth) {
+    return NextResponse.json({ error: 'غير مصرح بالدخول' }, { status: 401 });
   }
+  if (auth.blocked) {
+    return NextResponse.json({ error: 'الحساب موقوف' }, { status: 403 });
+  }
+
+  const { data: hazards, error } = await supabaseAdmin
+    .from('hazards')
+    .select('*')
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+
+  return NextResponse.json({
+    hazards: hazards || [],
+    currentUser: auth.profile,
+  });
 }
 
 export async function PATCH(req: NextRequest) {
-  try {
-    const { id, status } = await req.json();
-    if (!id || !status) {
-      return NextResponse.json({ error: 'Missing id or status' }, { status: 400 });
-    }
-
-    const { data: updatedHazard, error } = await supabase
-      .from('hazards')
-      .update({ status })
-      .eq('id', id)
-      .select('id, sender, hazard_category')
-      .single();
-
-    if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 });
-    }
-
-    if (updatedHazard?.sender) {
-      await notifyCitizenOnWhatsApp(
-        updatedHazard.sender,
-        updatedHazard.id,
-        updatedHazard.hazard_category,
-        status
-      );
-    }
-
-    return NextResponse.json({ success: true }, { status: 200 });
-  } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+  const auth = await getAuthenticatedUser(req);
+  if (!auth || auth.blocked || !auth.profile) {
+    return NextResponse.json({ error: 'غير مصرح بالدخول' }, { status: 401 });
   }
+
+  const role = auth.profile.role;
+  if (!['operator', 'supervisor', 'admin'].includes(role)) {
+    return NextResponse.json({ error: 'صلاحيتك الحالية (مراقب) لا تسمح بالتعديل' }, { status: 403 });
+  }
+
+  const body = await req.json();
+  const { id, status, is_escalated, assigned_to } = body;
+
+  if (!id) {
+    return NextResponse.json({ error: 'معرف البلاغ مطلوب' }, { status: 400 });
+  }
+
+  const updates: Record<string, unknown> = {};
+  if (status !== undefined) updates.status = status;
+
+  if (is_escalated !== undefined) {
+    if (!['supervisor', 'admin'].includes(role)) {
+      return NextResponse.json({ error: 'التصعيد متاح للمشرفين ومديري النظام فقط' }, { status: 403 });
+    }
+    updates.is_escalated = is_escalated;
+  }
+
+  if (assigned_to !== undefined) {
+    if (!['supervisor', 'admin'].includes(role)) {
+      return NextResponse.json({ error: 'إسناد البلاغات متاح للمشرفين ومديري النظام فقط' }, { status: 403 });
+    }
+    updates.assigned_to = assigned_to;
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from('hazards')
+    .update(updates)
+    .eq('id', id)
+    .select()
+    .single();
+
+  if (error) {
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+
+  return NextResponse.json({ hazard: data });
 }
 
 export async function DELETE(req: NextRequest) {
-  try {
-    const { searchParams } = new URL(req.url);
-    const idParam = searchParams.get('id');
-    const id = idParam ? Number(idParam) : null;
-
-    if (!id || Number.isNaN(id)) {
-      return NextResponse.json({ error: 'Invalid or missing hazard id' }, { status: 400 });
-    }
-
-    // جلب مسار الصورة لحذفها من Storage أيضًا إن أمكن
-    const { data: hazard } = await supabase
-      .from('hazards')
-      .select('image_url')
-      .eq('id', id)
-      .maybeSingle();
-
-    if (hazard?.image_url) {
-      const parts = hazard.image_url.split('/hazard-images/');
-      if (parts[1]) {
-        await supabase.storage.from('hazard-images').remove([parts[1]]);
-      }
-    }
-
-    const { error } = await supabase
-      .from('hazards')
-      .delete()
-      .eq('id', id);
-
-    if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 });
-    }
-
-    return NextResponse.json({ success: true }, { status: 200 });
-  } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+  const auth = await getAuthenticatedUser(req);
+  if (!auth || auth.blocked || !auth.profile) {
+    return NextResponse.json({ error: 'غير مصرح بالدخول' }, { status: 401 });
   }
+
+  if (auth.profile.role !== 'admin') {
+    return NextResponse.json({ error: 'حذف البلاغات متاح لمدير النظام فقط' }, { status: 403 });
+  }
+
+  const { searchParams } = new URL(req.url);
+  const id = searchParams.get('id');
+
+  if (!id) {
+    return NextResponse.json({ error: 'معرف البلاغ مطلوب' }, { status: 400 });
+  }
+
+  const { error } = await supabaseAdmin
+    .from('hazards')
+    .delete()
+    .eq('id', Number(id));
+
+  if (error) {
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+
+  return NextResponse.json({ deletedId: Number(id) });
 }
