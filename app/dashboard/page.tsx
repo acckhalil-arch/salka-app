@@ -8,6 +8,7 @@ import HazardsMap from './HazardsMap';
 export const dynamic = 'force-dynamic';
 
 type UserRole = 'viewer' | 'operator' | 'supervisor' | 'admin';
+type SlaState = 'on_track' | 'near_breach' | 'breached' | 'closed';
 
 interface UserProfile {
   id: string;
@@ -21,6 +22,8 @@ interface UserProfile {
 interface Hazard {
   id: number;
   created_at: string;
+  due_at?: string | null;
+  resolved_at?: string | null;
   sender: string;
   message: string | null;
   image_url: string | null;
@@ -35,12 +38,97 @@ interface Hazard {
   assigned_to?: string | null;
 }
 
+interface SlaInfo {
+  state: SlaState;
+  label: string;
+  detailText: string;
+  bg: string;
+  color: string;
+  border: string;
+}
+
 const ROLE_LABELS: Record<UserRole, { label: string; color: string; bg: string }> = {
   viewer: { label: 'مراقب (قراءة فقط)', color: '#94a3b8', bg: 'rgba(148, 163, 184, 0.15)' },
   operator: { label: 'مشغل عمليات', color: '#38bdf8', bg: 'rgba(56, 189, 248, 0.15)' },
   supervisor: { label: 'مشرف ميداني', color: '#fbbf24', bg: 'rgba(251, 191, 36, 0.15)' },
   admin: { label: 'مدير النظام', color: '#34d399', bg: 'rgba(52, 211, 153, 0.15)' },
 };
+
+const SLA_HOURS_BY_SEVERITY: Record<string, number> = {
+  'حرجة': 4,
+  'عالية': 24,
+  'متوسطة': 72,
+  'منخفضة': 168,
+};
+
+function formatDurationArabic(ms: number): string {
+  const absMs = Math.abs(ms);
+  const totalMinutes = Math.floor(absMs / 60000);
+  const days = Math.floor(totalMinutes / (60 * 24));
+  const hours = Math.floor((totalMinutes % (60 * 24)) / 60);
+  const minutes = totalMinutes % 60;
+
+  if (days > 0) return `${days} يوم و ${hours} ساعة`;
+  if (hours > 0) return `${hours} ساعة و ${minutes} دقيقة`;
+  return `${Math.max(1, minutes)} دقيقة`;
+}
+
+function evaluateSla(hazard: Hazard, nowMs: number): SlaInfo {
+  const createdMs = new Date(hazard.created_at).getTime();
+  const fallbackHours = SLA_HOURS_BY_SEVERITY[hazard.severity || 'منخفضة'] || 168;
+  const dueMs = hazard.due_at
+    ? new Date(hazard.due_at).getTime()
+    : createdMs + fallbackHours * 3600 * 1000;
+
+  if (hazard.status === 'تم الحل') {
+    const resolvedMs = hazard.resolved_at ? new Date(hazard.resolved_at).getTime() : nowMs;
+    const withinSla = resolvedMs <= dueMs;
+    return {
+      state: 'closed',
+      label: withinSla ? '✅ مغلق ضمن SLA' : '⚠️ مغلق بتأخير SLA',
+      detailText: `الموعد المستهدف: ${new Date(dueMs).toLocaleString('ar-EG')}`,
+      bg: withinSla ? 'rgba(16, 185, 129, 0.15)' : 'rgba(245, 158, 11, 0.15)',
+      color: withinSla ? '#6ee7b7' : '#fcd34d',
+      border: withinSla ? '#10b981' : '#f59e0b',
+    };
+  }
+
+  const remainingMs = dueMs - nowMs;
+  const totalWindowMs = Math.max(1, dueMs - createdMs);
+  const remainingRatio = remainingMs / totalWindowMs;
+
+  if (remainingMs <= 0) {
+    return {
+      state: 'breached',
+      label: '🔴 متجاوز للوقت (Breached)',
+      detailText: `متأخر منذ ${formatDurationArabic(remainingMs)}`,
+      bg: 'rgba(239, 68, 68, 0.2)',
+      color: '#fca5a5',
+      border: '#ef4444',
+    };
+  }
+
+  // Near Breach: less than 25% of SLA window left or under 60 minutes remaining
+  if (remainingRatio <= 0.25 || remainingMs <= 60 * 60 * 1000) {
+    return {
+      state: 'near_breach',
+      label: '🟠 قرب الانتهاء (Near Breach)',
+      detailText: `متبقي ${formatDurationArabic(remainingMs)}`,
+      bg: 'rgba(249, 115, 22, 0.2)',
+      color: '#fdba74',
+      border: '#f97316',
+    };
+  }
+
+  return {
+    state: 'on_track',
+    label: '🟢 ضمن الوقت (On Track)',
+    detailText: `متبقي ${formatDurationArabic(remainingMs)}`,
+    bg: 'rgba(34, 197, 94, 0.15)',
+    color: '#86efac',
+    border: '#22c55e',
+  };
+}
 
 export default function DashboardPage() {
   const router = useRouter();
@@ -52,12 +140,20 @@ export default function DashboardPage() {
   const [highlightedId, setHighlightedId] = useState<number | null>(null);
   const [severityFilter, setSeverityFilter] = useState<string>('الكل');
   const [statusFilter, setStatusFilter] = useState<string>('الكل');
+  const [slaFilter, setSlaFilter] = useState<string>('الكل');
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
   const supabase = useMemo(() => {
     const url = process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://placeholder.supabase.co';
     const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || 'placeholder-key';
     return createClient(url, key);
+  }, []);
+
+  // Refresh live SLA countdown every 30 seconds
+  useEffect(() => {
+    const timer = setInterval(() => setNowMs(Date.now()), 30000);
+    return () => clearInterval(timer);
   }, []);
 
   const showToast = (message: string, type: 'success' | 'error' = 'success') => {
@@ -82,6 +178,7 @@ export default function DashboardPage() {
       const data = await res.json();
       if (data.hazards) setHazards(data.hazards);
       if (data.currentUser) setCurrentUser(data.currentUser);
+      setNowMs(Date.now());
     } catch {
       showToast('تعذر تحميل بيانات البلاغات', 'error');
     } finally {
@@ -241,10 +338,16 @@ export default function DashboardPage() {
   const canDelete = userRole === 'admin';
   const roleMeta = ROLE_LABELS[userRole];
 
-  const filteredHazards = hazards.filter((h) => {
+  const enrichedHazards = hazards.map((h) => ({
+    ...h,
+    sla: evaluateSla(h, nowMs),
+  }));
+
+  const filteredHazards = enrichedHazards.filter((h) => {
     const matchSeverity = severityFilter === 'الكل' || h.severity === severityFilter;
     const matchStatus = statusFilter === 'الكل' || h.status === statusFilter;
-    return matchSeverity && matchStatus;
+    const matchSla = slaFilter === 'الكل' || h.sla.state === slaFilter;
+    return matchSeverity && matchStatus && matchSla;
   });
 
   const stats = {
@@ -252,7 +355,7 @@ export default function DashboardPage() {
     newCount: hazards.filter((h) => h.status === 'جديد').length,
     inProgress: hazards.filter((h) => h.status === 'قيد المعالجة').length,
     resolved: hazards.filter((h) => h.status === 'تم الحل').length,
-    critical: hazards.filter((h) => h.severity === 'حرجة' && h.status !== 'تم الحل').length,
+    slaBreached: enrichedHazards.filter((h) => h.sla.state === 'breached').length,
   };
 
   return (
@@ -272,7 +375,7 @@ export default function DashboardPage() {
       <header style={styles.header}>
         <div>
           <h1 style={styles.headerTitle}>غرفة العمليات المركزية — منصة سالكة</h1>
-          <p style={styles.headerSub}>الرصد البلدي الذكي والاستجابة الميدانية الفورية</p>
+          <p style={styles.headerSub}>الرصد البلدي الذكي ومراقبة اتفاقيات مستوى الخدمة (SLA)</p>
         </div>
 
         <div style={styles.userBar}>
@@ -319,30 +422,35 @@ export default function DashboardPage() {
           <span style={styles.kpiLabel}>تم الحل</span>
           <span style={{ ...styles.kpiValue, color: '#34d399' }}>{stats.resolved}</span>
         </div>
-        <div style={styles.kpiCard}>
-          <span style={styles.kpiLabel}>حالات حرجة نشطة</span>
-          <span style={{ ...styles.kpiValue, color: '#f87171' }}>{stats.critical}</span>
+        <div
+          style={{
+            ...styles.kpiCard,
+            borderColor: stats.slaBreached > 0 ? '#ef4444' : '#334155',
+          }}
+        >
+          <span style={styles.kpiLabel}>تجاوز SLA (متأخر)</span>
+          <span style={{ ...styles.kpiValue, color: '#f87171' }}>{stats.slaBreached}</span>
         </div>
       </section>
 
       <section style={styles.filterBar}>
         <div style={styles.filterGroup}>
-          <label style={styles.filterLabel}>تصفية حسب الخطورة:</label>
+          <label style={styles.filterLabel}>الخطورة:</label>
           <select
             value={severityFilter}
             onChange={(e) => setSeverityFilter(e.target.value)}
             style={styles.select}
           >
             <option value="الكل">الكل</option>
-            <option value="حرجة">حرجة</option>
-            <option value="عالية">عالية</option>
-            <option value="متوسطة">متوسطة</option>
-            <option value="منخفضة">منخفضة</option>
+            <option value="حرجة">حرجة (4 ساعات)</option>
+            <option value="عالية">عالية (24 ساعة)</option>
+            <option value="متوسطة">متوسطة (3 أيام)</option>
+            <option value="منخفضة">منخفضة (7 أيام)</option>
           </select>
         </div>
 
         <div style={styles.filterGroup}>
-          <label style={styles.filterLabel}>تصفية حسب الحالة:</label>
+          <label style={styles.filterLabel}>الحالة:</label>
           <select
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
@@ -355,6 +463,21 @@ export default function DashboardPage() {
           </select>
         </div>
 
+        <div style={styles.filterGroup}>
+          <label style={styles.filterLabel}>مؤشر SLA:</label>
+          <select
+            value={slaFilter}
+            onChange={(e) => setSlaFilter(e.target.value)}
+            style={styles.select}
+          >
+            <option value="الكل">الكل</option>
+            <option value="breached">🔴 متجاوز للوقت (Breached)</option>
+            <option value="near_breach">🟠 قرب الانتهاء (Near Breach)</option>
+            <option value="on_track">🟢 ضمن الوقت (On Track)</option>
+            <option value="closed">✅ مغلق</option>
+          </select>
+        </div>
+
         {!canUpdateStatus && (
           <div style={styles.readOnlyNotice}>
             👁️ أنت في وضع القراءة فقط (Viewer) — التعديل غير مفعل لهذا الحساب
@@ -362,7 +485,6 @@ export default function DashboardPage() {
         )}
       </section>
 
-      {/* Interactive GIS Operations Map */}
       <HazardsMap hazards={filteredHazards} onSelectHazard={handleSelectHazardFromMap} />
 
       <main style={styles.cardsGrid}>
@@ -371,13 +493,20 @@ export default function DashboardPage() {
         ) : (
           filteredHazards.map((hazard) => {
             const isHighlighted = highlightedId === hazard.id;
+            const autoEscalatedBySla = hazard.sla.state === 'breached' && !hazard.is_escalated;
             return (
               <article
                 id={`hazard-card-${hazard.id}`}
                 key={hazard.id}
                 style={{
                   ...styles.card,
-                  borderColor: isHighlighted ? '#38bdf8' : hazard.is_escalated ? '#f59e0b' : '#334155',
+                  borderColor: isHighlighted
+                    ? '#38bdf8'
+                    : hazard.sla.state === 'breached'
+                    ? '#ef4444'
+                    : hazard.is_escalated
+                    ? '#f59e0b'
+                    : '#334155',
                   boxShadow: isHighlighted ? '0 0 0 3px rgba(56, 189, 248, 0.4)' : 'none',
                 }}
               >
@@ -388,8 +517,15 @@ export default function DashboardPage() {
                       alt={hazard.hazard_category || 'صورة البلاغ'}
                       style={styles.cardImage}
                     />
-                    {hazard.is_escalated && (
-                      <span style={styles.escalatedBanner}>🚨 بلاغ مُصعَّد للإدارة</span>
+                    {(hazard.is_escalated || autoEscalatedBySla) && (
+                      <span
+                        style={{
+                          ...styles.escalatedBanner,
+                          backgroundColor: autoEscalatedBySla ? '#dc2626' : '#d97706',
+                        }}
+                      >
+                        {autoEscalatedBySla ? '⏰ تصعيد تلقائي (تجاوز SLA)' : '🚨 بلاغ مُصعَّد للإدارة'}
+                      </span>
                     )}
                   </div>
                 )}
@@ -400,6 +536,19 @@ export default function DashboardPage() {
                     <span style={{ ...styles.badge, ...getSeverityBadgeStyle(hazard.severity) }}>
                       {hazard.severity || 'غير محدد'}
                     </span>
+                  </div>
+
+                  {/* Live SLA Status Strip */}
+                  <div
+                    style={{
+                      ...styles.slaStrip,
+                      backgroundColor: hazard.sla.bg,
+                      borderColor: hazard.sla.border,
+                      color: hazard.sla.color,
+                    }}
+                  >
+                    <span style={styles.slaTitle}>{hazard.sla.label}</span>
+                    <span style={styles.slaDetail}>{hazard.sla.detailText}</span>
                   </div>
 
                   <h3 style={styles.categoryTitle}>{hazard.hazard_category || 'رصد بلدي عام'}</h3>
@@ -606,7 +755,7 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     flexWrap: 'wrap',
     alignItems: 'center',
-    gap: '20px',
+    gap: '16px',
     backgroundColor: '#1e293b',
     padding: '16px',
     borderRadius: '12px',
@@ -616,10 +765,10 @@ const styles: Record<string, React.CSSProperties> = {
   filterGroup: {
     display: 'flex',
     alignItems: 'center',
-    gap: '10px',
+    gap: '8px',
   },
   filterLabel: {
-    fontSize: '14px',
+    fontSize: '13px',
     color: '#cbd5e1',
     fontWeight: 600,
   },
@@ -628,8 +777,8 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#f8fafc',
     border: '1px solid #334155',
     borderRadius: '8px',
-    padding: '8px 12px',
-    fontSize: '14px',
+    padding: '8px 10px',
+    fontSize: '13px',
   },
   readOnlyNotice: {
     marginRight: 'auto',
@@ -706,6 +855,24 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 700,
     padding: '3px 10px',
     borderRadius: '9999px',
+  },
+  slaStrip: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: '6px',
+    padding: '8px 12px',
+    borderRadius: '8px',
+    border: '1px solid',
+    fontSize: '12px',
+  },
+  slaTitle: {
+    fontWeight: 700,
+  },
+  slaDetail: {
+    fontWeight: 500,
+    opacity: 0.9,
   },
   categoryTitle: {
     fontSize: '17px',
