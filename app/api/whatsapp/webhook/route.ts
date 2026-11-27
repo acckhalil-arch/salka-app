@@ -43,6 +43,7 @@ async function sendWhatsAppReply(to: string, text: string) {
   if (!ACCESS_TOKEN || !PHONE_NUMBER_ID || !to) return;
 
   const isNumericPhone = /^\d+$/.test(to);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const payload: Record<string, any> = {
     messaging_product: 'whatsapp',
     to,
@@ -122,12 +123,11 @@ async function analyzeHazardWithGemini(
 
   const modelsToTry = [
     'gemini-2.5-flash',
-    'gemini-2.0-flash',
     'gemini-2.5-flash-lite',
-    'gemini-1.5-flash',
+    'gemini-2.5-pro',
   ];
 
-  let lastError = 'Unknown Gemini error';
+  const errors: string[] = [];
 
   for (const model of modelsToTry) {
     try {
@@ -159,23 +159,27 @@ async function analyzeHazardWithGemini(
 
       if (!res.ok) {
         const errText = await res.text();
-        lastError = `${model} (${res.status}): ${errText.slice(0, 150)}`;
+        errors.push(`${model} (${res.status}): ${errText.slice(0, 140)}`);
         continue;
       }
 
       const data = await res.json();
       const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (!rawText) continue;
+      if (!rawText) {
+        errors.push(`${model}: empty response`);
+        continue;
+      }
 
       const cleanJson = rawText.replace(/```json|```/g, '').trim();
       const parsed = JSON.parse(cleanJson) as HazardAnalysis;
       return { result: parsed, error: null };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } catch (err: any) {
-      lastError = `${model} exception: ${err?.message || 'Unknown'}`;
+      errors.push(`${model} exception: ${err?.message || 'Unknown'}`);
     }
   }
 
-  return { result: null, error: lastError };
+  return { result: null, error: errors.join(' | ') };
 }
 
 export async function POST(req: NextRequest) {
@@ -266,7 +270,8 @@ export async function POST(req: NextRequest) {
           .select('id, latitude')
           .single();
 
-        const hasLocationAlready = updatedRow?.latitude !== null && updatedRow?.latitude !== undefined;
+        const hasLocationAlready =
+          updatedRow?.latitude !== null && updatedRow?.latitude !== undefined;
 
         await sendWhatsAppReply(
           sender,
