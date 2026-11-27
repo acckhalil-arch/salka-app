@@ -104,6 +104,97 @@ async function downloadWhatsAppMedia(
   }
 }
 
+async function discoverAvailableGeminiModels(): Promise<string[]> {
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models?key=${GEMINI_API_KEY}`
+    );
+    if (!res.ok) return [];
+    const data = await res.json();
+    const models = (data?.models || [])
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .filter((m: any) =>
+        Array.isArray(m.supportedGenerationMethods) &&
+        m.supportedGenerationMethods.includes('generateContent') &&
+        typeof m.name === 'string' &&
+        m.name.includes('gemini') &&
+        !m.name.includes('embedding') &&
+        !m.name.includes('imagen') &&
+        !m.name.includes('veo')
+      )
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .map((m: any) => m.name.replace(/^models\//, ''));
+
+    // Prioritize flash models first
+    return models.sort((a: string, b: string) => {
+      const aFlash = a.includes('flash') ? 0 : 1;
+      const bFlash = b.includes('flash') ? 0 : 1;
+      return aFlash - bFlash;
+    });
+  } catch {
+    return [];
+  }
+}
+
+async function callGeminiModel(
+  model: string,
+  prompt: string,
+  base64Image: string,
+  mimeType: string
+): Promise<{ result: HazardAnalysis | null; error: string | null }> {
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [
+            {
+              parts: [
+                { text: prompt },
+                {
+                  inline_data: {
+                    mime_type: mimeType,
+                    data: base64Image,
+                  },
+                },
+              ],
+            },
+          ],
+          generationConfig: {
+            responseMimeType: 'application/json',
+          },
+        }),
+      }
+    );
+
+    if (!res.ok) {
+      const errText = await res.text();
+      return {
+        result: null,
+        error: `${model} (${res.status}): ${errText.slice(0, 140)}`,
+      };
+    }
+
+    const data = await res.json();
+    const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!rawText) {
+      return { result: null, error: `${model}: empty response` };
+    }
+
+    const cleanJson = rawText.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(cleanJson) as HazardAnalysis;
+    return { result: parsed, error: null };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  } catch (err: any) {
+    return {
+      result: null,
+      error: `${model} exception: ${err?.message || 'Unknown'}`,
+    };
+  }
+}
+
 async function analyzeHazardWithGemini(
   imageBuffer: Buffer,
   mimeType: string
@@ -121,65 +212,31 @@ async function analyzeHazardWithGemini(
   "description": "وصف فني مختصر ودقيق باللغة العربية في جملة واحدة لما يظهر في الصورة"
 }`;
 
-  const modelsToTry = [
-    'gemini-2.5-flash',
-    'gemini-2.5-flash-lite',
-    'gemini-2.5-pro',
+  const primaryModels = [
+    'gemini-3-flash-preview',
+    'gemini-3.1-flash-lite-preview',
+    'gemini-flash-latest',
+    'gemini-3.1-pro-preview',
   ];
 
   const errors: string[] = [];
 
-  for (const model of modelsToTry) {
-    try {
-      const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [
-              {
-                parts: [
-                  { text: prompt },
-                  {
-                    inline_data: {
-                      mime_type: mimeType,
-                      data: base64Image,
-                    },
-                  },
-                ],
-              },
-            ],
-            generationConfig: {
-              responseMimeType: 'application/json',
-            },
-          }),
-        }
-      );
-
-      if (!res.ok) {
-        const errText = await res.text();
-        errors.push(`${model} (${res.status}): ${errText.slice(0, 140)}`);
-        continue;
-      }
-
-      const data = await res.json();
-      const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (!rawText) {
-        errors.push(`${model}: empty response`);
-        continue;
-      }
-
-      const cleanJson = rawText.replace(/```json|```/g, '').trim();
-      const parsed = JSON.parse(cleanJson) as HazardAnalysis;
-      return { result: parsed, error: null };
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    } catch (err: any) {
-      errors.push(`${model} exception: ${err?.message || 'Unknown'}`);
-    }
+  for (const model of primaryModels) {
+    const attempt = await callGeminiModel(model, prompt, base64Image, mimeType);
+    if (attempt.result) return { result: attempt.result, error: null };
+    if (attempt.error) errors.push(attempt.error);
   }
 
-  return { result: null, error: errors.join(' | ') };
+  // Auto-discover available models for this API key if primary list fails
+  const discovered = await discoverAvailableGeminiModels();
+  for (const model of discovered) {
+    if (primaryModels.includes(model)) continue;
+    const attempt = await callGeminiModel(model, prompt, base64Image, mimeType);
+    if (attempt.result) return { result: attempt.result, error: null };
+    if (attempt.error) errors.push(attempt.error);
+  }
+
+  return { result: null, error: errors.slice(0, 4).join(' | ') };
 }
 
 export async function POST(req: NextRequest) {
